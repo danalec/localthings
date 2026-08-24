@@ -1,0 +1,12 @@
+{
+  "domain": "samsung_tv_local",
+  "name": "Samsung TV Local (QN90B)",
+  "codeowners": ["@danalec"],
+  "config_flow": true,
+  "dependencies": [],
+  "documentation": "https://github.com/danalec/localthings",
+  "issue_tracker": "https://github.com/danalec/localthings/issues",
+  "iot_class": "local_polling",
+  "requirements": ["websockets>=13.0"],
+  "version": "0.1.0"
+}

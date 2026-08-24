@@ -1,0 +1,31 @@
+{
+  "title": "Samsung TV Local (QN90B)",
+  "config": {
+    "step": {
+      "user": {
+        "title": "Samsung TV (QN90B)",
+        "description": "Local WebSocket control (no SmartThings). Enter the TV's IP, its MAC address (for Wake-on-LAN), a name, and optionally an existing auth token. Leave the token empty to pair via the TV's on-screen Allow popup.",
+        "data": {
+          "host": "IP address",
+          "mac": "MAC address",
+          "name": "Name",
+          "token": "Auth token (optional)"
+        }
+      },
+      "pairing": {
+        "title": "Pairing",
+        "description": "Click Continue: the token is granted automatically (no PIN). If the TV has never authorized this client, an Allow popup may appear — press Allow if it does."
+      }
+    },
+    "error": {
+      "cannot_connect": "Could not reach the TV or no token was granted. Is it powered on?"
+    }
+  },
+  "entity": {
+    "button": {
+      "launch_app": {
+        "name": "Launch {app}"
+      }
+    }
+  }
+}
