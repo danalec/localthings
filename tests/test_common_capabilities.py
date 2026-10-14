@@ -1,4 +1,12 @@
-from custom_components.localthings.registry.capabilities import common
+import pytest
+
+from custom_components.localthings.registry.capabilities import (
+    air_purifier,
+    airconditioner,
+    common,
+    fridge,
+    range_hood,
+)
 from custom_components.localthings.registry.discovery import discover
 from custom_components.localthings.registry.entities import BinarySensorDesc, SwitchDesc
 from tests.conftest import _load_device
@@ -65,6 +73,21 @@ class TestMergeOptionsField:
         cached = ["DetergentLevelCtrl_1", "SoftenerLevelCtrl_0", "GMT_04"]
         merged = common.merge_options_field(cached, ["SoftenerLevelCtrl_2"])
         assert merged == ["DetergentLevelCtrl_1", "SoftenerLevelCtrl_2", "GMT_04"]
+
+    def test_keeps_siblings_sharing_a_first_segment(self):
+        """washer_wf80h reports MildDetergentAlarm_Off beside
+        MildDetergentAlarm_Notice_0; a first-underscore prefix overwrote both."""
+        cached = ["MildDetergentAlarm_Off", "MildDetergentAlarm_Notice_0", "Course_1B"]
+        assert common.merge_options_field(cached, ["MildDetergentAlarm_On"]) == [
+            "MildDetergentAlarm_On",
+            "MildDetergentAlarm_Notice_0",
+            "Course_1B",
+        ]
+        assert common.merge_options_field(cached, ["MildDetergentAlarm_Notice_1"]) == [
+            "MildDetergentAlarm_Off",
+            "MildDetergentAlarm_Notice_1",
+            "Course_1B",
+        ]
 
     def test_handles_missing_cache(self):
         assert common.merge_options_field(None, ["Course_1D"]) == ["Course_1D"]
@@ -534,16 +557,16 @@ class TestAiEnergyLevelSelect:
         desc = self._desc()
         assert desc.translation_key is None
 
-    def test_options_synthesize_off(self):
-        """'0' is never in supportedAiLevel but is a real, observed aiLevel
-        value -- synthesized back in as the explicit off option."""
+    def test_options_are_the_board_s_own_levels(self):
+        """No synthesized '0': writing it left two multi-level fridges at
+        aiLevel '254' rather than off (#410)."""
         desc = self._desc()
         resources = {"/energy/ailevel/vs/0": {"supportedAiLevel": ["1", "2"]}}
-        assert desc.options(resources) == ["0", "1", "2"]
+        assert desc.options(resources) == ["1", "2"]
 
     def test_options_empty_when_resource_missing(self):
         desc = self._desc()
-        assert desc.options({}) == ["0"]
+        assert desc.options({}) == []
 
     def test_write(self):
         desc = self._desc()
@@ -642,6 +665,10 @@ class TestUniversalAndPowerBundles:
             common.KIDS_LOCK_VS_FALLBACK,
             common.REMOTE_CONTROL_GENERIC,
             common.REMOTE_CONTROL_VS_FALLBACK,
+            # Coverage-only, and in UNIVERSAL because the file surface is
+            # advertised by every board family on record (issue #301).
+            common.FILE_LIST,
+            common.FILE_TRANSFER,
         }
 
     def test_power_kept_separate_for_airconditioners_sake(self):
@@ -657,3 +684,144 @@ class TestUniversalAndPowerBundles:
         bound_caps = {c for caps in airconditioner.REGISTRY.capabilities.values() for c in caps}
         assert common.POWER_GENERIC not in bound_caps
         assert common.POWER_VS_FALLBACK not in bound_caps
+
+
+def _water_filter_desc(fixture, key):
+    """The bound descriptor for `key`, or None when its exists_fn declines it.
+
+    Same shape as the per-family helpers: flatten() yields values, not
+    descriptors, so this is how a test reaches write_fn without standing up
+    an HA entity.
+    """
+    resources = _load_device(fixture)
+    for item in discover(resources, _reg()):
+        if item.desc.key == key and (
+            item.desc.exists_fn is None
+            or item.desc.exists_fn(resources.get(item.href) or {}, resources)
+        ):
+            return item.desc
+    return None
+
+
+def test_water_filter_reset_writes_the_boards_trigger_value():
+    """filterReset 'On', measured on a TP1X_REF_21K: filterUsage 100 -> 0 and
+    filterStatus replace -> normal, still zero on a fresh DTLS session. The
+    value is case-sensitive ('on'/'ON' fault with 5.00) and the field is a
+    trigger the board never reports back, so it can't be gated on itself --
+    see docs/investigations/filter-reset.md."""
+    desc = _water_filter_desc("refrigerator_tp1x_ref_21k_us", "filter_reset")
+    assert desc is not None
+    assert desc.write_fn(desc.payload, {}) == (
+        ["filter", "waterfilter", "vs", "0"],
+        {"x.com.samsung.da.filterReset": "On"},
+    )
+
+
+def _reset_gate(rep):
+    """The filter_reset button's own exists_fn, against a synthetic rep.
+
+    Fixture-driven here would be vacuous: no fixture pairs a populated
+    waterfilter rep with a missing filterResetType (the dishwashers are
+    filterStatus 'notused', which WATER_FILTER.match_fn rejects outright,
+    or an unfetched stub), so the gate would never actually be called.
+    """
+    desc = next(e for e in common.WATER_FILTER.entities if e.key == "filter_reset")
+    assert desc.exists_fn is not None, "filter_reset must stay gated"
+    return desc.exists_fn(rep, {})
+
+
+def test_water_filter_reset_needs_a_reset_the_device_says_it_supports():
+    """filterResetType names which resets exist, and the corpus carries
+    ['notresetable'] as well -- a presence check would read that as a yes."""
+    assert _reset_gate({"x.com.samsung.da.filterResetType": ["replaceable"]})
+    assert _reset_gate({"x.com.samsung.da.filterResetType": ["washable"]})
+    assert not _reset_gate({"x.com.samsung.da.filterResetType": ["notresetable"]})
+    assert not _reset_gate({"x.com.samsung.da.filterResetType": []})
+    assert not _reset_gate({"x.com.samsung.da.filterUsage": "40"})
+
+
+def test_water_filter_reset_survives_an_unfetched_stub():
+    """An explicit exists_fn bypasses entity._is_included's stub carve-out,
+    which would otherwise drop the button for the life of the config entry
+    when /device/0 answers a not-yet-fetched {"href": ...} stub.
+
+    A genuinely empty {} rep is the opposite case and must stay excluded --
+    the device's confirmed answer that this resource will never populate,
+    which issue #127 exists to keep distinct from a stub."""
+    assert _reset_gate({"href": "/filter/waterfilter/vs/0"})
+    assert not _reset_gate({})
+
+
+def test_water_filter_reset_follows_the_devices_own_reset_claim():
+    """The gate is filterResetType, so the button reaches every family that
+    advertises one -- four fridges and three water purifiers here, of which
+    only TP1X_REF_21K is hardware-verified. Pinned deliberately: the blast
+    radius of trusting the device's claim should fail this test if it grows,
+    rather than widening unnoticed."""
+    for fixture in (
+        "refrigerator_artik051_ref_17k",
+        "refrigerator",
+        "refrigerator_tp2x_ref_20k",
+        "water_purifier",
+        "water_purifier_coffee",
+        "water_purifier_ailite_25k",
+    ):
+        assert _water_filter_desc(fixture, "filter_reset") is not None, fixture
+
+
+@pytest.mark.parametrize(
+    "capability,key,href",
+    [
+        (common.WATER_FILTER, "filter_reset", "/filter/waterfilter/vs/0"),
+        (airconditioner.AIR_FILTER, "air_filter_reset", "/filter/airdustfilter/vs/0"),
+        (airconditioner.AIR_FILTER_PM1, "air_filter_pm1_reset", "/filter/airdustPM1filter/vs/0"),
+        (air_purifier.HEPA_FILTER, "hepa_filter_reset", "/filter/hepafilter/vs/0"),
+        (fridge.AIR_FILTER, "air_filter_reset", "/filter/airdustfilter/vs/0"),
+        (fridge.DEODOR_FILTER, "deodor_filter_reset", "/filter/deodorfilter/vs/0"),
+        (range_hood.HOOD_FILTER, "hood_filter_reset", "/filter/hoodfilter/vs/0"),
+    ],
+)
+def test_every_filter_reset_writes_to_its_own_resource(capability, key, href):
+    """filterReset 'On' is a property of the x.com.samsung.da.filter.* resource
+    type, confirmed on two unrelated families (a TP1X_REF_21K water filter and
+    a TP1X_DA_AC_RAC_01001 air filter, #449). The factory derives the path from
+    each capability's own href, so a button can never write to a sibling
+    filter's resource -- which is the failure a shared descriptor invites."""
+    desc = next((e for e in capability.entities if e.key == key), None)
+    assert desc is not None, f"{key} missing from {capability.href}"
+    assert capability.href == href
+    assert desc.write_fn(desc.payload, {}) == (
+        [s for s in href.strip("/").split("/") if s],
+        {"x.com.samsung.da.filterReset": "On"},
+    )
+
+
+@pytest.mark.parametrize(
+    "capability,key,href",
+    [
+        (common.WATER_FILTER, "filter_reset", "/filter/waterfilter/vs/0"),
+        (airconditioner.AIR_FILTER, "air_filter_reset", "/filter/airdustfilter/vs/0"),
+        (airconditioner.AIR_FILTER_PM1, "air_filter_pm1_reset", "/filter/airdustPM1filter/vs/0"),
+        (air_purifier.HEPA_FILTER, "hepa_filter_reset", "/filter/hepafilter/vs/0"),
+        (fridge.AIR_FILTER, "air_filter_reset", "/filter/airdustfilter/vs/0"),
+        (fridge.DEODOR_FILTER, "deodor_filter_reset", "/filter/deodorfilter/vs/0"),
+        (range_hood.HOOD_FILTER, "hood_filter_reset", "/filter/hoodfilter/vs/0"),
+    ],
+)
+def test_filter_reset_survives_the_resources_aware_write_call(capability, key, href):
+    """The coordinator offers every write_fn the four-argument
+    (payload, rep, href, resources) form first and falls back to three on
+    TypeError, so a write_fn's arity is part of its contract. Issue #461: a
+    fourth parameter carrying the bound path segments swallowed `resources`
+    instead, and the button posted to every href on the device at once
+    ('path_segs must contain at most 32 values'). Called the way the
+    coordinator calls it, the path must still be this filter's own."""
+    desc = next(e for e in capability.entities if e.key == key)
+    try:
+        result = desc.write_fn(desc.payload, {}, href, {"/power/vs/0": {}, href: {}})
+    except TypeError:
+        result = desc.write_fn(desc.payload, {}, href)
+    assert result == (
+        [s for s in href.strip("/").split("/") if s],
+        {"x.com.samsung.da.filterReset": "On"},
+    )

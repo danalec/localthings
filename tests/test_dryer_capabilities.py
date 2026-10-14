@@ -4,7 +4,7 @@ from custom_components.localthings.registry.adapter import flatten
 from custom_components.localthings.registry.by_type import for_device_by_model, resolve
 from custom_components.localthings.registry.capabilities import dryer, ignored
 from custom_components.localthings.registry.discovery import discover
-from custom_components.localthings.registry.entities import SelectDesc
+from custom_components.localthings.registry.entities import SelectDesc, SensorDesc
 from tests.conftest import _load_device
 
 
@@ -48,9 +48,30 @@ def test_expected_entities_present():
         "remote_control",
         "dry_level",
         "wrinkle_prevent",
+        "damp_alert",
+        "wrinkle_prevent_active",
         "energy_kwh",
     ):
         assert key in state, key
+
+
+def test_dry_level_presence_is_field_gated_not_narrowed_by_an_exists_fn():
+    """dry_level must appear wherever the sensor it replaced did.
+
+    washer.py gates its combo dry_level on supportedDryLevel to tell a combo
+    from a plain washer; every dryer has a dry level, so the same gate here
+    would only ever suppress the entity -- including on a rep that is merely
+    a stub at discovery, which entity._is_included deliberately admits so a
+    sub-poll can populate it.
+
+    A missing entity would be permanent and silent: __init__'s
+    _drop_sensors_superseded_by_selects removes the old sensor row on every
+    setup, unconditionally, so there is nothing left to fall back to.
+    """
+    desc = next(e for e in dryer.DRYER_SETTINGS.entities if e.key == "dry_level")
+    assert isinstance(desc, SelectDesc)
+    assert desc.exists_fn is None
+    assert desc.field == "x.com.samsung.da.dryLevel"
 
 
 def test_job_beginning_status_reads_current_status():
@@ -140,6 +161,59 @@ def test_st_dryercourse_is_ignored():
     assert "/st/washercourse/vs/0" in ignored_hrefs
 
 
+class TestDampAlert:
+    """Damp Alert switch over /course/vs/0's options[] array."""
+
+    @staticmethod
+    def _desc():
+        return next(e for e in dryer.DRYER_COURSE.entities if e.key == "damp_alert")
+
+    def test_exists_only_when_token_present(self):
+        assert self._desc().exists_fn({"x.com.samsung.da.options": []}, {}) is False
+        rep = {"x.com.samsung.da.options": ["MixedLoadBell_Disable"]}
+        assert self._desc().exists_fn(rep, {}) is True
+
+    def test_reads_enable_and_disable(self):
+        rep = lambda token: {"x.com.samsung.da.options": [token]}  # noqa: E731
+        assert self._desc().rep_fn(rep("MixedLoadBell_Enable")) is True
+        assert self._desc().rep_fn(rep("MixedLoadBell_Disable")) is False
+
+    def test_write_maps_on_off_to_enable_disable(self):
+        rep = {"x.com.samsung.da.options": ["MixedLoadBell_Disable", "GMT_F2"]}
+        path, body = self._desc().write_fn("On", rep)
+        assert path == ["course", "vs", "0"]
+        assert body == {"x.com.samsung.da.options": ["MixedLoadBell_Enable"]}
+
+        rep = {"x.com.samsung.da.options": ["MixedLoadBell_Enable"]}
+        path, body = self._desc().write_fn("Off", rep)
+        assert body == {"x.com.samsung.da.options": ["MixedLoadBell_Disable"]}
+
+    def test_write_rejects_non_on_off_payload(self):
+        rep = {"x.com.samsung.da.options": ["MixedLoadBell_Disable"]}
+        assert self._desc().write_fn("bogus", rep) is None
+
+    def test_write_needs_a_populated_options_array(self):
+        assert self._desc().write_fn("On", {}) is None
+
+
+class TestWrinklePreventActive:
+    """Wrinkle-prevent running indicator over /course/vs/0's options[] array."""
+
+    @staticmethod
+    def _desc():
+        return next(e for e in dryer.DRYER_COURSE.entities if e.key == "wrinkle_prevent_active")
+
+    def test_exists_only_when_token_present(self):
+        assert self._desc().exists_fn({"x.com.samsung.da.options": []}, {}) is False
+        rep = {"x.com.samsung.da.options": ["WrinklePreventRunning_Off"]}
+        assert self._desc().exists_fn(rep, {}) is True
+
+    def test_reads_on_and_off(self):
+        rep = lambda token: {"x.com.samsung.da.options": [token]}  # noqa: E731
+        assert self._desc().rep_fn(rep("WrinklePreventRunning_On")) is True
+        assert self._desc().rep_fn(rep("WrinklePreventRunning_Off")) is False
+
+
 def _dv6800n():
     resources = _load_device("dryer_dv6800n")
     reg = resolve(resources, device_types=("oic.wk.d", "oic.d.dryer"))
@@ -166,3 +240,98 @@ def test_dv6800n_course_codes_read_from_dump():
     assert desc.translation_key(resources) == "dryer_cycle_table_00"
     confirmed = ["9A", "CA", "DB", "99", "93", "B5", "D7", "A5", "96", "97", "7F", "98", "EB", "B6"]
     assert desc.options(resources) == confirmed
+
+
+def _settings_desc(key):
+    return next(e for e in dryer.DRYER_SETTINGS.entities if e.key == key)
+
+
+def _on_course(resources, code):
+    """The same dump with a different course selected."""
+    rep = dict(resources["/course/vs/0"])
+    rep["x.com.samsung.da.options"] = [
+        f"Course_{code}" if o.startswith("Course_") else o for o in rep["x.com.samsung.da.options"]
+    ]
+    return {**resources, "/course/vs/0": rep}
+
+
+def test_dv6800n_dry_time_and_dry_level_narrow_to_complementary_courses():
+    """The two dials are mutually exclusive per course on this board (see
+    test_dv6800n_dry_policy_agrees_with_the_other_board_family), so narrowing
+    both collapses whichever one the selected course does not use down to its
+    live value -- rather than offering a dial the appliance will ignore.
+
+    Course 9A (Cotton) is a dry-level course and 7F (Time Dry) a timed one.
+    The live dryTime is 00:00:00 throughout this dump, which is why it
+    survives on 7F despite sitting outside that course's mask: the union
+    that keeps a live value addressable is what stops the entity reading as
+    unknown mid-course-change.
+    """
+    _, resources = _dv6800n()
+    level, timed = _settings_desc("dry_level"), _settings_desc("dry_time")
+
+    cotton = _on_course(resources, "9A")
+    assert level.options(cotton) == ["1", "2", "3"]
+    assert timed.options(cotton) == ["00:00:00"]
+
+    time_dry = _on_course(resources, "7F")
+    assert level.options(time_dry) == ["2"]
+    assert timed.options(time_dry) == [
+        "00:00:00",
+        "00:30:00",
+        "01:00:00",
+        "01:30:00",
+        "02:00:00",
+        "02:30:00",
+    ]
+
+
+def test_dry_time_keeps_its_full_list_where_the_board_carries_no_0xe_group():
+    """Every board here but the DV6800N reports a supportedDryTime with no
+    0xE group anywhere in supportedOptions. Absence there is not a refusal --
+    course_option_mask returns None and the full list stands, so naming 0xE
+    narrows nothing on a board that never spoke about it.
+
+    All four are checked rather than one, because they are also the boards
+    whose lists run past the eight entries a one-byte mask can address: if a
+    later dump pairs a long list with a 0xE group, this is where it surfaces.
+    """
+    desc = _settings_desc("dry_time")
+    for name in ("dryer", "dryer_dv80h", "dryer_tp1_21_drum_clean", "washer_dryer_onebody_awm"):
+        resources = _load_device(name)
+        supported = resources["/washer/vs/0"]["x.com.samsung.da.supportedDryTime"]
+        assert len(supported) >= 11, name
+        assert desc.options(resources) == supported, name
+
+
+def test_dv8900b_course_list_is_fully_translated():
+    """A DV8900B reporting Table_03 (issue #464): every course its
+    editCourseList advertises has a name. The owner confirmed 2F, 30, 32, 33,
+    34, 35, 36 and 3E by selecting each cycle on the panel."""
+    from custom_components.localthings.catalog import translated_states
+
+    desc = next(
+        e for e in dryer.DRYER_COURSE.entities if e.key == "cycle" and isinstance(e, SelectDesc)
+    )
+    live = {
+        "/wm/editcourse/vs/0": {
+            "x.com.samsung.da.editCourseList": "EditCourseList_01360605022F173E073335340E3032"
+        }
+    }
+    codes = {code.lower() for code in desc.options(live)}
+    assert {"2f", "30", "32", "33", "34", "35", "36", "3e"} <= codes
+    assert codes <= translated_states("select", "dryer_cycle_table_03")
+
+
+def test_gas_dryer_type_is_named():
+    """A DV8900B reports dryerType 'Gas' (issue #464)."""
+    from custom_components.localthings.catalog import translated_states
+
+    desc = next(
+        e
+        for e in dryer.DRYER_SETTINGS.entities
+        if e.key == "dryer_type" and isinstance(e, SensorDesc)
+    )
+    assert desc.value_fn("Gas") == "gas"
+    assert "gas" in desc.options
+    assert "gas" in translated_states("sensor", "dryer_type")

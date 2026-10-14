@@ -5,23 +5,22 @@ from __future__ import annotations
 import asyncio
 import contextlib
 import datetime
-import errno
+import http.client
+import ipaddress
 import json
 import logging
 import re
-import selectors
 import socket
 import ssl
 import time
-from concurrent.futures import ThreadPoolExecutor
-from dataclasses import dataclass
+from collections.abc import Callable, Mapping
 from typing import Any
 
 import voluptuous as vol
 from homeassistant import config_entries
-from homeassistant.config_entries import ConfigFlowResult
+from homeassistant.config_entries import SOURCE_REAUTH, ConfigFlowResult
 from homeassistant.core import callback
-from homeassistant.helpers import device_registry as dr
+from homeassistant.helpers.device_registry import format_mac
 from homeassistant.helpers.selector import (
     NumberSelector,
     NumberSelectorConfig,
@@ -34,44 +33,81 @@ from homeassistant.helpers.selector import (
     TextSelectorConfig,
     TextSelectorType,
 )
+from homeassistant.helpers.service_info.dhcp import DhcpServiceInfo
+from homeassistant.helpers.typing import UNDEFINED, UndefinedType
+from smartthings_local.errors import PeerInitiatedHandshakeError
+from smartthings_local.protocol.auth import AuthenticationProvider, PskAuth
 
-from . import cloudcourse
+from . import cloudcourse, probing
 from .const import (
+    AUTH_CERTIFICATE,
+    AUTH_PSK,
     CLIENTHELLO_PROBE_RETRIES,
     CLIENTHELLO_PROBE_TIMEOUT_S,
+    CONF_AUTH_CARRIER,
     CONF_BYPASS_REMOTE_CONTROL,
     CONF_CA_CERT_PEM,
     CONF_CA_KEY_PEM,
     CONF_CLOUD_COURSES_ENABLED,
     CONF_DEVICE_KEY,
+    CONF_DEVICE_TOKEN,
     CONF_DEVICE_TYPE,
     CONF_FINISH_TIME_HYSTERESIS_MINUTES,
     CONF_HOST,
     CONF_LEAF_CERT_PEM,
     CONF_LEAF_KEY_PEM,
     CONF_LEARN_MODES,
+    CONF_LEGACY_FAMILY,
+    CONF_MAC,
     CONF_MANUFACTURER,
     CONF_MODEL,
+    CONF_OCF_DEVICE_ID,
     CONF_PORT,
+    CONF_PSK_IDENTITY,
+    CONF_PSK_KEY,
+    CONF_PSK_PROFILE,
     CONF_SERIAL,
+    CONF_TRANSPORT,
     DEFAULT_CLOUD_COURSES_ENABLED,
     DEFAULT_FINISH_TIME_HYSTERESIS_MINUTES,
     DEFAULT_LEARN_MODES,
     DOMAIN,
-    LIVENESS_PROBE_TIMEOUT_S,
-    PREFERRED_PROBE_PORTS,
+    LEGACY_HTTP_PORT,
     PROBE_GET_TIMEOUT_S,
-    PROBE_MAX_WORKERS,
     PROBE_PORT_RANGE,
+    PSK_PROFILE_OWNER,
+    PSK_PROFILE_PEER,
+    PSK_TRACKING_ISSUE_URL,
     SERVICE_WRITE_RESOURCE,
+    TRANSPORT_LEGACY_HTTP,
 )
+from .credentials import (
+    DeviceBinding,
+    InvalidCredentialConfig,
+    PskIdentityZeroByte,
+    authentication_carrier,
+    check_device_binding,
+    identity_may_be_suggested_from_doxm,
+    normalize_psk_identity,
+    normalize_psk_key,
+    psk_credentials,
+)
+from .devices import find_entry_device
 from .learned import persist as learned_persist
 from .learned import stored as learned_stored
+from .legacy_http_token import (
+    CallbackCertRejected,
+    CallbackPortUnavailable,
+    obtain_device_token,
+)
 from .registry.capabilities.laundry import cycle_options, personal_course_labels
 from .registry.subdevices import MAIN
+from .session import psk_provider
+from .transport import AuthRejected, DtlsTransport, local_source_port
 
 _TEXT = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT))
 _MULTILINE = TextSelector(TextSelectorConfig(type=TextSelectorType.TEXT, multiline=True))
+_PASSWORD = TextSelector(TextSelectorConfig(type=TextSelectorType.PASSWORD))
 _HYSTERESIS_MINUTES = NumberSelector(
     NumberSelectorConfig(
         min=0,
@@ -105,6 +141,8 @@ class CannotConnect(Exception):
     """
 
     error_key = "cannot_connect"
+    # The plaintext port the appliance answered on, when the probe found one.
+    plaintext_port: int | None = None
 
 
 class NoResponse(CannotConnect):
@@ -125,6 +163,37 @@ class NoDtlsServer(CannotConnect):
     error_key = "no_dtls_server"
 
 
+class ApplianceNoDtls(CannotConnect):
+    """The device identified itself over plaintext CoAP, and no DTLS answered.
+
+    Distinct from NoDtlsServer because the advice differs: there is no
+    question left about whether the address belongs to an appliance.
+    """
+
+    error_key = "appliance_no_dtls"
+
+    def __init__(self, message: str, model: str, port: str) -> None:
+        super().__init__(message)
+        self.placeholders = {"model": model, "port": port}
+
+
+class NonApplianceStack(CannotConnect):
+    """The address answers as an OCF stack that isn't an appliance (#540).
+
+    It declares no appliance type, multicast found no appliance behind it
+    (usually because Home Assistant is on another subnet), and its secure
+    port then failed the handshake.
+    """
+
+    error_key = "non_appliance_stack"
+
+
+class MultipleAppliances(CannotConnect):
+    """More than one OCF appliance answers at this address (#540)."""
+
+    error_key = "multiple_appliances"
+
+
 class HandshakeTimeout(CannotConnect):
     """A DTLS server is confirmed present but never finished the handshake."""
 
@@ -135,6 +204,23 @@ class CertRejected(CannotConnect):
     """The appliance broke off the handshake over our certificate."""
 
     error_key = "cert_rejected"
+
+
+class PskRejected(CannotConnect):
+    """The appliance broke off the handshake over our PSK identity or key."""
+
+    error_key = "psk_rejected"
+
+
+class IdentityUnproven(CannotConnect):
+    """A PSK authenticated, but the appliance served no usable `/oic/d` di.
+
+    ECDHE-PSK has no server certificate, so that read is the only proof of
+    which appliance holds the key (#435). Without it there is nothing to
+    bind the entry to, so setup stops rather than calling the key bad.
+    """
+
+    error_key = "identity_unproven"
 
 
 class HandshakeFailed(CannotConnect):
@@ -155,8 +241,27 @@ class UnexpectedResponse(CannotConnect):
     error_key = "unexpected_response"
 
 
+class TokenNotReceived(CannotConnect):
+    """The legacy bridge never sent a device token back (issue #168).
+
+    The appliance issues it through a callback to port 8889, so this is as
+    often a network or an appliance-asleep problem as a real failure -- and
+    the step it is raised from offers pasting a token instead.
+    """
+
+    error_key = "token_not_received"
+
+
 class InvalidCA(Exception):
     error_key = "invalid_ca"
+
+
+class LegacyHttpFamily(Exception):
+    """The appliance serves the legacy HTTPS bridge, not CoAP/DTLS (issue #168).
+
+    Raised before any credential work: there is nothing at this address to
+    handshake with; the flow takes the device-token step instead.
+    """
 
 
 def _fetch_samsung_uuid() -> str:
@@ -195,6 +300,27 @@ def _normalize_pem(text: str) -> str:
     return "\n".join(lines)
 
 
+def _uuid_subject_name(uuid: str):
+    """The X.509 subject an appliance authenticates by.
+
+    TizenRT's iotivity locates the peer identity with `memmem(subject,
+    "uuid:")`, so the UUID must appear in an RDN in that form. The country
+    and organization mirror Samsung's own leaf and are cosmetic; only the
+    `uuid:` token in OU/CN is load-bearing.
+    """
+    from cryptography import x509
+    from cryptography.x509.oid import NameOID
+
+    return x509.Name(
+        [
+            x509.NameAttribute(NameOID.COUNTRY_NAME, "KR"),
+            x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Samsung Electronics"),
+            x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, f"uuid:{uuid}"),
+            x509.NameAttribute(NameOID.COMMON_NAME, f"urn:uuid:{uuid}"),
+        ]
+    )
+
+
 def _mint_leaf_cert(ca_cert_pem: str, ca_key_pem: str, uuid: str) -> tuple[str, str]:
     """Mint a fresh RSA-2048 leaf cert signed by the CA.
 
@@ -205,7 +331,6 @@ def _mint_leaf_cert(ca_cert_pem: str, ca_key_pem: str, uuid: str) -> tuple[str, 
     from cryptography.hazmat.primitives import hashes, serialization
     from cryptography.hazmat.primitives.asymmetric import dsa, ec, ed448, ed25519
     from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
-    from cryptography.x509.oid import NameOID
 
     m = re.search(
         r"(-----BEGIN CERTIFICATE-----.*?-----END CERTIFICATE-----)",
@@ -236,16 +361,7 @@ def _mint_leaf_cert(ca_cert_pem: str, ca_key_pem: str, uuid: str) -> tuple[str, 
     now = datetime.datetime.now(datetime.UTC)
     leaf_cert = (
         x509.CertificateBuilder()
-        .subject_name(
-            x509.Name(
-                [
-                    x509.NameAttribute(NameOID.COUNTRY_NAME, "KR"),
-                    x509.NameAttribute(NameOID.ORGANIZATION_NAME, "Samsung Electronics"),
-                    x509.NameAttribute(NameOID.ORGANIZATIONAL_UNIT_NAME, f"uuid:{uuid}"),
-                    x509.NameAttribute(NameOID.COMMON_NAME, f"urn:uuid:{uuid}"),
-                ]
-            )
-        )
+        .subject_name(_uuid_subject_name(uuid))
         .issuer_name(ca_cert.subject)
         .public_key(leaf_key.public_key())
         .serial_number(x509.random_serial_number())
@@ -269,213 +385,78 @@ def _mint_leaf_cert(ca_cert_pem: str, ca_key_pem: str, uuid: str) -> tuple[str, 
     return fullchain_pem, leaf_key_pem
 
 
-def _order_candidates(ports: list[int]) -> list[int]:
-    """Order live ports so the historically known DTLS ports are tried first."""
-    preferred = [p for p in PREFERRED_PROBE_PORTS if p in ports]
-    rest = sorted(p for p in ports if p not in PREFERRED_PROBE_PORTS)
-    return preferred + rest
+def _mint_self_signed(uuid: str) -> tuple[str, str]:
+    """Mint a fresh RSA-2048 leaf that signs itself, keyed to the UUID.
 
+    The AC14K_M-generation appliances (e.g. the AILITE dishwasher and TP1X
+    refrigerator families) authorize by the subject UUID against the on-device
+    ACL and do not validate the client certificate's signer, chain, or
+    signature digest, so a self-signed leaf completes the DTLS handshake and is
+    accepted -- confirmed by factorial test against two such units. This needs
+    no CA material at all, which is why it is the default the config flow tries
+    before ever asking for AC14K_M credentials.
 
-# The kernel's way of saying the datagram never had anywhere to go: no route,
-# or the host never answered ARP. Distinct from ECONNREFUSED, which is a
-# response -- the host is there and told us the port is closed. Both leave a
-# port "not live", but mean opposite things about whether anything exists at
-# that address.
-_UNREACHABLE_ERRNOS = frozenset({errno.EHOSTUNREACH, errno.ENETUNREACH, errno.ENETDOWN})
-
-
-@dataclass(frozen=True)
-class _SweepResult:
-    """What the UDP sweep observed, kept as three separate verdicts."""
-
-    live: list[int]  # silent -> open|filtered, worth a handshake
-    refused: list[int]  # ICMP port-unreachable -> host is up, port closed
-    unreachable: list[int]  # no route / no ARP -> nothing is at that address
-
-
-def _find_live_ports(host: str, ports: list[int], timeout: float) -> _SweepResult:
-    """Fast UDP liveness sweep -- the sweep's own verdict, nothing added.
-
-    UDP is connectionless, but a connected UDP socket surfaces the ICMP
-    port-unreachable a closed port returns as ECONNREFUSED on its next recv.
-    So we send one probe datagram per port and watch for that error:
-    ECONNREFUSED means closed; silence/data means possibly live. The
-    in-process equivalent of ``nmap -sU``: takes a nine-port range down to
-    the one or two worth a full DTLS handshake, bounded to ``timeout``.
-
-    Deliberately the raw verdict, with no preferred-port rescue folded in
-    (that's `_sweep_ports`) -- its shape is evidence about the host, and a
-    refusal vs. an unreachable are counted apart rather than both "not
-    live" for that reason (see _SweepResult).
+    Returns (fullchain_pem, leaf_key_pem); the fullchain is the leaf alone,
+    since it is its own issuer and there is nothing to append.
     """
-    sockets: dict[int, socket.socket] = {}
-    sel = selectors.DefaultSelector()
-    refused: list[int] = []
-    unreachable: list[int] = []
-    # A single byte is enough to provoke an ICMP port-unreach from a closed
-    # port; a real DTLS ClientHello is unnecessary just to test for life.
-    probe = b"\x00"
+    from cryptography import x509
+    from cryptography.hazmat.primitives import hashes, serialization
+    from cryptography.hazmat.primitives.asymmetric import rsa as _rsa
 
-    def _rule_out(port: int, exc: OSError) -> None:
-        (unreachable if exc.errno in _UNREACHABLE_ERRNOS else refused).append(port)
+    leaf_key = _rsa.generate_private_key(public_exponent=65537, key_size=2048)
+    subject = _uuid_subject_name(uuid)
 
-    try:
-        for port in ports:
-            sock = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-            sock.setblocking(False)
-            try:
-                sock.connect((host, port))
-                sock.send(probe)
-            except OSError as exc:
-                # Failing on the way out means the kernel already knows the
-                # datagram can't get there.
-                _rule_out(port, exc)
-                sock.close()
-                continue
-            sockets[port] = sock
-            sel.register(sock, selectors.EVENT_READ, port)
-
-        # Ports drop out of the selector as they refuse; whatever is still
-        # registered when the deadline passes is silent-but-live (a candidate).
-        deadline = time.monotonic() + timeout
-        while sel.get_map():
-            remaining = deadline - time.monotonic()
-            if remaining <= 0:
-                break
-            for key, _ in sel.select(timeout=remaining):
-                sock = sockets[key.data]
-                try:
-                    # Data back means live; an error rules the port out.
-                    sock.recv(1)
-                except OSError as exc:
-                    _rule_out(key.data, exc)
-                    sel.unregister(sock)
-        live = [key.data for key in sel.get_map().values()]
-    finally:
-        sel.close()
-        for sock in sockets.values():
-            with contextlib.suppress(OSError):
-                sock.close()
-
-    return _SweepResult(_order_candidates(live), sorted(refused), sorted(unreachable))
-
-
-def _sweep_ports(host: str, ports: list[int], timeout: float) -> tuple[_SweepResult, list[int]]:
-    """`(sweep, candidates)` -- what the host said, and what to actually try.
-
-    The sweep's ICMP-based verdict isn't reliable on every network path --
-    issue #192 captured a segregated-VLAN device where it called live ports
-    that nmap showed closed, while the port nmap found genuinely open never
-    showed up as live at all. Rather than trust a wrong "not live" verdict
-    on a port with strong prior evidence, the historically-confirmed ports
-    always get a real handshake attempt too (bounded cost: at most
-    len(PREFERRED_PROBE_PORTS) extra handshakes, only when the sweep
-    disagrees with the prior).
-
-    Both halves are returned, not just the union, since they answer
-    different questions: `candidates` is what to hand a handshake, `sweep`
-    is what the host actually told us about itself.
-    """
-    sweep = _find_live_ports(host, ports, timeout)
-    rescued = [p for p in PREFERRED_PROBE_PORTS if p in ports and p not in sweep.live]
-    return sweep, _order_candidates(sweep.live + rescued)
-
-
-@dataclass(frozen=True)
-class _PortScan:
-    """What port detection learned about a host.
-
-    `candidates` is what gets a full DTLS handshake. The other two are the
-    evidence behind a failure message: `confirmed` names ports a DTLS
-    server was proven on, `swept` is the UDP sweep's own verdict (None
-    when the sweep never had to run).
-    """
-
-    candidates: list[int]
-    confirmed: list[int]
-    swept: _SweepResult | None = None
-
-
-def _clienthello_probe(host: str, port: int):
-    """One stateless DTLS ClientHello against `host:port`. Imported lazily
-    so an install whose smartthings-local predates the probe (< 0.1.2)
-    degrades to the UDP sweep at scan time rather than failing to load the
-    config flow at all."""
-    from smartthings_local.protocol.dtls_probe import probe
-
-    return probe(
-        host,
-        port,
-        stateless=True,
-        timeout=CLIENTHELLO_PROBE_TIMEOUT_S,
-        retries=CLIENTHELLO_PROBE_RETRIES,
+    now = datetime.datetime.now(datetime.UTC)
+    leaf_cert = (
+        x509.CertificateBuilder()
+        .subject_name(subject)
+        .issuer_name(subject)
+        .public_key(leaf_key.public_key())
+        .serial_number(x509.random_serial_number())
+        .not_valid_before(now)
+        .not_valid_after(now + datetime.timedelta(days=10 * 365))
+        .sign(leaf_key, hashes.SHA256())
     )
 
+    fullchain_pem = leaf_cert.public_bytes(serialization.Encoding.PEM).decode()
+    if not fullchain_pem.endswith("\n"):
+        fullchain_pem += "\n"
+    leaf_key_pem = leaf_key.private_bytes(
+        serialization.Encoding.PEM,
+        serialization.PrivateFormat.PKCS8,
+        serialization.NoEncryption(),
+    ).decode()
+    return fullchain_pem, leaf_key_pem
 
-def _clienthello_scan(host: str, ports: list[int]) -> list[int]:
-    """Ports on `host` that answered a DTLS ClientHello -- i.e. ports a real
-    DTLS server is listening on (issue #211).
 
-    smartthings-local's stateless probe sends one ClientHello and stops the
-    moment the server proves itself with a HelloVerifyRequest, which per RFC
-    6347 §4.2.1 the server answers without allocating association state --
-    identifies the device's real port in ~1 RTT, far cheaper than throwing N
-    full certificate handshakes at it.
+def _probe_legacy(host: str, cert_pem: str, key_pem: str, token: str) -> dict:
+    """Read identity over the 8888 bridge, in the shape _create_entry wants.
 
-    The whole range goes out at once, safely: each probe is bounded by
-    CLIENTHELLO_PROBE_TIMEOUT_S rather than DtlsCoapSession's 12s handshake
-    timeout, so the pool's shutdown-and-wait on exit costs one probe's
-    budget, not the sum of the range.
+    Two passes, because the family that picks the envelope table is itself
+    read from the appliance: identity first, then the device through its
+    family's table. An unmapped family stops at identity and goes on as an
+    unrecognized device type, the same as a DTLS board nothing routes.
     """
-    with ThreadPoolExecutor(max_workers=min(len(ports), PROBE_MAX_WORKERS)) as ex:
-        results = list(ex.map(lambda port: _clienthello_probe(host, port), ports))
+    from .legacy_http import is_mapped
+    from .legacy_http_transport import LegacyHttpTransport
 
-    live = []
-    for result in results:
-        if result.is_dtls_server:
-            live.append(result.port)
-            _LOGGER.debug("DTLS server on %s:%d (%s)", host, result.port, result)
-    return _order_candidates(live)
+    def _read(family: str | None) -> dict:
+        transport = LegacyHttpTransport(
+            host, LEGACY_HTTP_PORT, cert_pem=cert_pem, key_pem=key_pem, token=token, family=family
+        )
+        transport.connect()
+        try:
+            return _read_device(transport, host, LEGACY_HTTP_PORT)
+        except (OSError, http.client.HTTPException) as err:
+            raise CannotConnect(f"{host}:{LEGACY_HTTP_PORT} did not answer: {err}") from err
+        finally:
+            transport.close()
 
-
-def _scan_ports(host: str) -> _PortScan:
-    """Find the device's DTLS port, preferring proof over absence of evidence.
-
-    The ClientHello probe is authoritative when it finds something: exactly
-    one port gets the expensive certificate handshake instead of every port
-    the old UDP sweep couldn't rule out (issue #211's 30-40s of 12s handshake
-    timeouts).
-
-    It's a gate, not a replacement: when it confirms nothing, we fall back
-    to the ICMP-based sweep, which still surfaces a device the probe
-    couldn't reach (a network path dropping the ClientHello, or an install
-    on smartthings-local < 0.1.2). Issue #192's segregated-VLAN device is
-    why that fallback keeps its own preferred-port rescue.
-    """
-    try:
-        confirmed = _clienthello_scan(host, PROBE_PORT_RANGE)
-    except Exception as exc:
-        _LOGGER.debug("ClientHello probe unavailable (%s); falling back to UDP sweep", exc)
-        confirmed = []
-    if confirmed:
-        _LOGGER.debug("DTLS port(s) confirmed on %s: %s", host, confirmed)
-        return _PortScan(confirmed, confirmed)
-
-    sweep, candidates = _sweep_ports(host, PROBE_PORT_RANGE, LIVENESS_PROBE_TIMEOUT_S)
-    # No early "nothing here" fast-fail on an empty sweep: the rescue always
-    # keeps PREFERRED_PROBE_PORTS as candidates (issue #192), so a real
-    # handshake attempt still happens. What the sweep saw is carried along
-    # instead, and _classify_handshake_failure turns it into a message once
-    # those attempts have actually failed.
-    _LOGGER.debug(
-        "No DTLS server confirmed on %s; sweep saw live=%s refused=%s unreachable=%s, trying %s",
-        host,
-        sweep.live,
-        sweep.refused,
-        sweep.unreachable,
-        candidates,
-    )
-    return _PortScan(candidates, [], sweep)
+    info = _read(None)
+    family = info.get("description", "")
+    if is_mapped(family):
+        return _read(family)
+    return {**info, "device_type_name": None, "device_type_recognized": False}
 
 
 # TLS alerts (RFC 5246 §7.2) that mean "I looked at your certificate and
@@ -495,6 +476,11 @@ _CERT_ALERTS = frozenset(
         "certificate_required",
     }
 )
+
+# What a PSK handshake draws when the identity is unknown or the key is
+# wrong (the Finished MAC fails). decrypt_error is here as well as above
+# because which carrier was offered decides what it means.
+_PSK_ALERTS = frozenset({"unknown_psk_identity", "decrypt_error", "bad_record_mac"})
 
 # Older smartthings-local (< 0.1.3) rendered a received fatal alert straight
 # into the handshake exception's text, e.g. "tlsv1 alert unknown ca" wrapped
@@ -516,7 +502,14 @@ def _alert_name(exc: Exception) -> str | None:
     return match.group(1).strip().replace(" ", "_") if match else None
 
 
-def _diagnostic_alert(host: str, port: int, cert_pem: str, key_pem: str):
+def _diagnostic_alert(
+    host: str,
+    port: int,
+    cert_pem: str | None,
+    key_pem: str | None,
+    *,
+    auth: AuthenticationProvider | None = None,
+):
     """One opt-in stateful handshake against `port`, using our real
     credentials, so a fatal Alert can be classified from the raw record
     itself rather than parsed out of an exception's text.
@@ -529,23 +522,33 @@ def _diagnostic_alert(host: str, port: int, cert_pem: str, key_pem: str):
     one more orphaned association is a fair trade for a message that says
     why, on a path the user is about to retry regardless.
 
-    Imported lazily, like `_clienthello_probe`, so an install whose
+    Imported lazily, like `_clienthello_scan`, so an install whose
     smartthings-local predates this API degrades to a generic message
     instead of failing to load the config flow at all.
     """
     from smartthings_local.protocol.dtls_probe import diagnose_dtls_handshake
 
+    credential: dict[str, Any] = (
+        {"auth": auth} if auth is not None else {"cert_pem": cert_pem, "key_pem": key_pem}
+    )
     return diagnose_dtls_handshake(
         host,
         port,
-        cert_pem=cert_pem,
-        key_pem=key_pem,
+        **credential,
         timeout=CLIENTHELLO_PROBE_TIMEOUT_S,
         retries=CLIENTHELLO_PROBE_RETRIES,
     )
 
 
-def _resolve_alert(exc: Exception, host: str, port: int, cert_pem: str, key_pem: str) -> str | None:
+def _resolve_alert(
+    exc: Exception,
+    host: str,
+    port: int,
+    cert_pem: str | None,
+    key_pem: str | None,
+    *,
+    auth: AuthenticationProvider | None = None,
+) -> str | None:
     """The TLS alert `port`'s failed handshake carried, if any -- the
     exception's own text first (cheap, and all an older library ever
     offers), then one bounded diagnostic handshake against a current one
@@ -554,10 +557,29 @@ def _resolve_alert(exc: Exception, host: str, port: int, cert_pem: str, key_pem:
     if name is not None:
         return name
     try:
-        result = _diagnostic_alert(host, port, cert_pem, key_pem)
+        result = _diagnostic_alert(host, port, cert_pem, key_pem, auth=auth)
     except Exception:
         return None
+    # How far the appliance got is the evidence a bare timeout lacks: no
+    # reply at all, a cookie exchange and then silence, or its whole flight
+    # and then silence after ours (#504). The counts include resends, so a
+    # re-issued HelloVerifyRequest shows as two where the names show one.
+    server_sent = getattr(result, "handshake_msgs", None)
+    _LOGGER.debug(
+        "diagnostic handshake on port %d: outcome=%s server_sent=%s counts=%s alert=%s",
+        port,
+        getattr(result, "outcome", None),
+        server_sent,
+        dict(getattr(result, "handshake_counts", None) or {}),
+        result.alert,
+    )
     if result.alert is None:
+        return None
+    if isinstance(exc, TimeoutError) and server_sent is not None and not server_sent:
+        # A bare alert with nothing ahead of it, after the real handshake
+        # timed out, is the appliance refusing every new peer by then: it
+        # never got as far as our certificate, so it is not why the
+        # handshake failed (#504).
         return None
     level, name = result.alert
     # ProbeResult.alert is set for a *received* alert record of either
@@ -571,26 +593,35 @@ def _resolve_alert(exc: Exception, host: str, port: int, cert_pem: str, key_pem:
 
 def _classify_handshake_failure(
     host: str,
-    scan: _PortScan,
+    scan: probing.HostProbe,
     failures: list[tuple[int, Exception]],
     alerts: dict[int, str] | None = None,
+    *,
+    psk: bool = False,
 ) -> CannotConnect:
     """Turn "no port worked" into the most specific thing we can honestly
     say, in rough order of how much the evidence tells us: an alert means
     the appliance refused us on purpose (and says whether it was our
-    certificate); a confirmed DTLS port that then timed out is likely still
-    holding a session from a previous attempt; otherwise the sweep's own
+    certificate); a confirmed DTLS port that then timed out, even after
+    _worth_retrying's retry, is a handshake timeout; otherwise the sweep's own
     shape is the evidence.
 
     `alerts` is the per-port classification `_handshake_and_read` already
     resolved (exception text, or a diagnostic handshake -- see
     _resolve_alert); a caller with only raw failures (or an older library)
     still gets `_alert_name`'s exception-text reading as a fallback.
+
+    `psk` says a pre-shared key was offered, which changes which alerts
+    mean "your credential": no certificate was sent to reject.
     """
     resolved = dict(alerts or {})
     for port, exc in failures:
         resolved.setdefault(port, _alert_name(exc))
     alert_names = [name for name in resolved.values() if name]
+    if psk:
+        psk_alerts = [name for name in alert_names if name in _PSK_ALERTS]
+        if psk_alerts:
+            return PskRejected(f"{host} rejected our pre-shared key (alert {psk_alerts[0]})")
     cert_alerts = [name for name in alert_names if name in _CERT_ALERTS]
     if cert_alerts:
         return CertRejected(f"{host} rejected our certificate (alert {cert_alerts[0]})")
@@ -599,6 +630,20 @@ def _classify_handshake_failure(
     if scan.confirmed:
         return HandshakeTimeout(
             f"DTLS server confirmed on {host}:{scan.confirmed} but the handshake never completed"
+        )
+
+    if scan.plaintext is not None or scan.advertised:
+        # It answered the discovery channel -- named its secure port, its
+        # identity, or both -- so the address is not in doubt and neither is
+        # what kind of device it is, even if /oic/d and /oic/p both failed.
+        advertised = ", ".join(str(port) for port in scan.advertised) or "none advertised"
+        model = "unknown"
+        if scan.plaintext is not None:
+            model = scan.plaintext.model or scan.plaintext.vendor_id or "unknown"
+        return ApplianceNoDtls(
+            f"{host} answered plaintext CoAP but no DTLS handshake completed",
+            model=model,
+            port=advertised,
         )
 
     sweep = scan.swept
@@ -621,30 +666,62 @@ def _classify_handshake_failure(
     return NoDtlsServer(f"ports on {host} are reachable but none answered a DTLS handshake")
 
 
-def _mint_credentials(ca_cert_pem: str, ca_key_pem: str) -> tuple[str, str]:
-    """Fetch the current UUID from Samsung's cloud and mint a leaf cert for it."""
+def _mint_for_current_uuid(
+    mint: Callable[[str], tuple[str, str]],
+) -> tuple[str, str]:
+    """Fetch the current UUID from Samsung's cloud and mint a leaf with it.
+
+    `mint` is the per-credential minter -- ``_mint_self_signed`` for the
+    default, or a closure over ``_mint_leaf_cert`` and a CA for the fallback.
+    The UUID fetch, its cloud-unreachable classification, and the mint
+    failure wrapping are shared; only the signing differs.
+    """
     _LOGGER.debug("Fetching Samsung cloud UUID from %s", _SAMSUNG_CLOUD_HOST)
     try:
         uuid = _fetch_samsung_uuid()
     except Exception as exc:
         _LOGGER.debug("UUID fetch failed: %s", exc, exc_info=True)
         raise CloudUnreachable(f"Failed to fetch Samsung UUID: {exc}") from exc
-    _LOGGER.debug("Got UUID: %s", uuid)
 
     _LOGGER.debug("Minting leaf cert for UUID %s", uuid)
     try:
-        fullchain_pem, leaf_key_pem = _mint_leaf_cert(ca_cert_pem, ca_key_pem, uuid)
+        return mint(uuid)
     except InvalidCA:
+        # Only _mint_leaf_cert raises this; the self-signed minter never does.
         _LOGGER.debug("CA credentials invalid", exc_info=True)
         raise
     except Exception as exc:
         _LOGGER.debug("Leaf cert minting failed: %s", exc, exc_info=True)
         raise CannotConnect(f"Failed to mint leaf cert: {exc}") from exc
-    _LOGGER.debug("Leaf cert minted successfully")
-    return fullchain_pem, leaf_key_pem
 
 
-def _read_device(sess, host: str, port: int) -> dict:
+def _mint_credentials(ca_cert_pem: str, ca_key_pem: str) -> tuple[str, str]:
+    """Mint a leaf cert signed by the supplied AC14K_M CA."""
+    return _mint_for_current_uuid(lambda uuid: _mint_leaf_cert(ca_cert_pem, ca_key_pem, uuid))
+
+
+def _mint_preferred(ca_cert_pem: str, ca_key_pem: str) -> tuple[str, str]:
+    """Mint with an AC14K_M CA when one is stored, self-signed otherwise.
+
+    The credential choice is the same wherever a leaf is minted, so both
+    the DTLS probe and the legacy 8888 branch share it rather than each
+    deciding for itself.
+    """
+    if ca_cert_pem and ca_key_pem:
+        return _mint_credentials(ca_cert_pem, ca_key_pem)
+    return _mint_self_signed_credentials()
+
+
+def _mint_self_signed_credentials() -> tuple[str, str]:
+    """Mint a self-signed leaf -- the no-credentials default.
+
+    Only the cloud UUID is needed, not an AC14K_M CA, so a first-time setup
+    needs nothing but the appliance's IP.
+    """
+    return _mint_for_current_uuid(_mint_self_signed)
+
+
+def _read_device(transport, host: str, port: int) -> dict:
     """Resolve this device's identity over an already-connected session.
 
     /oic/d before /device/0, deliberately: the device's own OCF device-type
@@ -659,29 +736,27 @@ def _read_device(sess, host: str, port: int) -> dict:
     so the coordinator never has to mint a registry key from a placeholder
     (issue #236).
     """
-    import cbor2
-
     from .registry.batch import parse_device0_batch
     from .registry.by_type import resolve as resolve_registry
     from .registry.identity import (
+        proven_ocf_device_id,
         read_identity,
         resolve_device_key,
+        resolve_mac,
         resolve_model,
         resolve_serial,
     )
 
-    identity = read_identity(sess, None)
+    identity = read_identity(transport, None)
 
-    code, payload = sess.get(["device", "0"], timeout=PROBE_GET_TIMEOUT_S)
-    if code != 0x45 or not payload:
+    code, body = transport.read(["device", "0"], timeout=PROBE_GET_TIMEOUT_S)
+    if code != 0x45 or body is None:
         # Authenticated fine, so this isn't a connectivity or credentials
         # problem -- whatever is on this port just isn't an appliance whose
         # /device/0 we understand.
         raise UnexpectedResponse(
-            f"{host}:{port} answered /device/0 with {code >> 5}.{code & 0x1F:02d} "
-            f"({code:#04x}), payload {len(payload or b'')} bytes"
+            f"{host}:{port} answered /device/0 with {code >> 5}.{code & 0x1F:02d} ({code:#04x})"
         )
-    body = cbor2.loads(payload)
     resources = parse_device0_batch(body) if isinstance(body, list) else {}
 
     info = resources.get("/information/vs/0", {})
@@ -698,20 +773,32 @@ def _read_device(sess, host: str, port: int) -> dict:
         # change of key against it (issue #381). read_identity has already
         # fetched /oic/p and /oic/d above, so this costs no extra round trip.
         "device_key": resolve_device_key(identity, raw_serial, host),
+        # The `di` this handshake actually proved, kept beside `device_key`
+        # rather than folded into it -- see const.CONF_OCF_DEVICE_ID. None
+        # when the device reported no usable one.
+        "ocf_device_id": proven_ocf_device_id(identity),
         "serial": resolve_serial(raw_serial, host),
+        # None for a board that doesn't report /wirelessinfo/vs/0 -- see
+        # resolve_mac, and CONF_MAC for what the stored value is for.
+        "mac": resolve_mac(resources),
         "model": resolve_model(info.get("x.com.samsung.da.modelNum", ""), identity),
         "manufacturer": identity.manufacturer or "Samsung",
         "device_type_name": registry.name if registry is not None else None,
         "device_type_recognized": registry is not None,
+        # What the appliance calls its own family ('TP6X_WASHER'), which is
+        # what selects the envelope table on the 8888 bridge (issue #168).
+        "description": info.get("x.com.samsung.da.description", ""),
     }
 
 
 def _diagnose_failures(
     host: str,
-    scan: _PortScan,
+    scan: probing.HostProbe,
     failures: list[tuple[int, Exception]],
-    cert_pem: str,
-    key_pem: str,
+    cert_pem: str | None,
+    key_pem: str | None,
+    *,
+    auth: AuthenticationProvider | None = None,
 ) -> dict[int, str]:
     """At most one diagnostic handshake (see _diagnostic_alert) across every
     port `_handshake_and_read` just gave up on -- not one per port.
@@ -736,75 +823,194 @@ def _diagnose_failures(
         return {}
     by_port = dict(failures)
     port = next((p for p in scan.confirmed if p in by_port), next(iter(by_port)))
-    alert = _resolve_alert(by_port[port], host, port, cert_pem, key_pem)
+    alert = _resolve_alert(by_port[port], host, port, cert_pem, key_pem, auth=auth)
     return {port: alert} if alert is not None else {}
 
 
-def _handshake_and_read(host: str, scan: _PortScan, cert_pem: str, key_pem: str) -> dict:
-    """Handshake each candidate in turn, returning the first device that answers."""
-    from smartthings_local.protocol.dtls_session import DtlsCoapSession
+def _worth_retrying(exc: Exception, confirmed: bool, local_port: int | None) -> bool:
+    """One immediate retry on the same port, for the two failures a second
+    handshake is known to clear.
 
+    A peer-initiated collision clears the appliance's peer, so the library
+    says an immediate retry normally succeeds. A timeout on a confirmed port
+    is worth one only from the fixed source port: that ClientHello replaces
+    the half-open peer the first attempt left, where one from a fresh port
+    would just add a second to a table this firmware never prunes (#504).
+    """
+    if isinstance(exc, PeerInitiatedHandshakeError):
+        return True
+    return isinstance(exc, TimeoutError) and confirmed and local_port is not None
+
+
+def _source_port_bindable(host: str, local_port: int) -> bool:
+    """Whether the library's own bind of `local_port` would succeed: same
+    family, same SO_REUSEADDR. Checked up front because the library reports
+    a failed bind as the same EndpointError as a refused or failed send."""
+    try:
+        family = socket.getaddrinfo(host, None, type=socket.SOCK_DGRAM)[0][0]
+        with socket.socket(family, socket.SOCK_DGRAM) as sock:
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("::", local_port, 0, 0) if family == socket.AF_INET6 else ("", local_port))
+    except OSError:
+        return False
+    return True
+
+
+def _connect_and_read(
+    host: str,
+    port: int,
+    cert_pem: str | None,
+    key_pem: str | None,
+    local_port: int | None,
+    *,
+    auth: AuthenticationProvider | None = None,
+) -> dict:
+    transport = None
+    try:
+        transport = (
+            DtlsTransport(host, port, auth=auth, local_port=local_port)
+            if auth is not None
+            else DtlsTransport(
+                host, port, cert_pem=cert_pem, key_pem=key_pem, local_port=local_port
+            )
+        )
+        transport.connect()
+        return _read_device(transport, host, port)
+    finally:
+        if transport is not None:
+            with contextlib.suppress(Exception):
+                transport.close()
+
+
+def _handshake_and_read(
+    host: str,
+    scan: probing.HostProbe,
+    cert_pem: str | None,
+    key_pem: str | None,
+    local_port: int | None = None,
+    *,
+    psk: PskAuth | None = None,
+) -> dict:
+    """Handshake each candidate in turn, returning the first device that answers.
+
+    `local_port` is the fixed source port the entry's coordinator will dial
+    from (transport.local_source_port), or None for an ephemeral one -- see
+    LocalThingsConfigFlow._setup_source_port for when each applies.
+
+    `psk`, when given, is offered instead of the certificate.
+
+    A failure carries the appliance's plaintext port as `plaintext_port`,
+    so the credential step reads that stack's doxm and not another's (#540).
+    """
+    if scan.appliance_responders > 1:
+        raise MultipleAppliances(f"{scan.appliance_responders} OCF appliances answer at {host}")
+    if local_port is not None and scan.candidates and not _source_port_bindable(host, local_port):
+        _LOGGER.debug("source port %d unavailable; using an ephemeral one", local_port)
+        local_port = None
     failures: list[tuple[int, Exception]] = []
     for port in scan.candidates:
-        sess = None
-        try:
-            sess = DtlsCoapSession(host, port, cert_pem=cert_pem, key_pem=key_pem)
-            sess.connect()
-            sess.start_reader()
-            return _read_device(sess, host, port)
-        except CannotConnect:
-            # The device answered, just not with something we can use --
-            # trying the remaining ports can't improve on that.
-            raise
-        except Exception as exc:
-            failures.append((port, exc))
-            _LOGGER.debug("port %d failed: %s", port, exc)
-        finally:
-            if sess is not None:
-                with contextlib.suppress(Exception):
-                    sess.close()
-    alerts = _diagnose_failures(host, scan, failures, cert_pem, key_pem)
-    raise _classify_handshake_failure(host, scan, failures, alerts)
+        retried = False
+        while True:
+            try:
+                return _connect_and_read(host, port, cert_pem, key_pem, local_port, auth=psk)
+            except CannotConnect as err:
+                # The device answered, just not with something we can use --
+                # trying the remaining ports can't improve on that.
+                failure = _stack_failure(host, scan, err)
+                if failure is err:
+                    raise
+                raise failure from err
+            except Exception as exc:
+                if not retried and _worth_retrying(exc, port in scan.confirmed, local_port):
+                    retried = True
+                    _LOGGER.debug("port %d failed (%s); retrying once", port, exc)
+                    continue
+                failures.append((port, exc))
+                _LOGGER.debug("port %d failed: %s", port, exc)
+                break
+    alerts = _diagnose_failures(host, scan, failures, cert_pem, key_pem, auth=psk)
+    raise _stack_failure(
+        host, scan, _classify_handshake_failure(host, scan, failures, alerts, psk=psk is not None)
+    )
+
+
+def _stack_failure(host: str, scan: probing.HostProbe, err: CannotConnect) -> CannotConnect:
+    """`err`, or NonApplianceStack when the stack dialled declared no
+    appliance type: its refusal says nothing about our credential (#540)."""
+    if scan.typeless_stack:
+        err = NonApplianceStack(f"{host} answers as an OCF stack with no appliance type ({err})")
+    err.plaintext_port = scan.plaintext_port
+    return err
 
 
 def _probe_and_validate(
     host: str,
-    ca_cert_pem: str,
-    ca_key_pem: str,
+    ca_cert_pem: str = "",
+    ca_key_pem: str = "",
     existing_leaf: tuple[str, str] | None = None,
+    local_port: int | None = None,
 ) -> dict:
     """Find the device's port, authenticate to it, and resolve its identity.
 
     Port detection runs first and needs no credentials, so an unreachable
     host fails here rather than after a round trip to Samsung's cloud.
 
+    The credential minted depends on what was supplied. With no CA (the
+    default), a self-signed leaf is used: the AC14K_M-generation appliances
+    accept it, so most setups never need any pasted credential. When an
+    AC14K_M CA cert and key are supplied -- the fallback for a device that
+    rejected the self-signed leaf -- the leaf is signed by that CA instead.
+
     `existing_leaf` is another entry's already-minted leaf (issue #211).
     Every appliance accepts the same leaf, so adding a second device can
     skip the fetch and mint entirely -- independent of Samsung-cloud
     reachability, not merely faster. If that reused leaf turns out to be
-    stale (the UUID does rotate), a confirmed-live device rejecting it
-    re-mints and retries once, so the reuse stays self-correcting.
+    stale (the UUID does rotate) or a chain-validating device rejects it, a
+    confirmed-live device rejecting it re-mints and retries once, so the
+    reuse stays self-correcting.
+
+    Raises CertRejected when a freshly minted leaf is refused: only new
+    credentials from the caller (the AC14K_M fallback step) can change that,
+    so the retry is worthwhile solely for a reused leaf.
     """
-    scan = _scan_ports(host)
+    scan = probing.look(host)
+    if scan.legacy_http and not scan.candidates:
+        raise LegacyHttpFamily(f"{host} serves the legacy bridge on TCP 8888")
 
     if existing_leaf is not None:
         cert_pem, key_pem = existing_leaf
         _LOGGER.debug("Reusing the leaf certificate from an existing entry")
     else:
-        cert_pem, key_pem = _mint_credentials(ca_cert_pem, ca_key_pem)
+        cert_pem, key_pem = _mint_preferred(ca_cert_pem, ca_key_pem)
 
     try:
-        info = _handshake_and_read(host, scan, cert_pem, key_pem)
+        info = _handshake_and_read(host, scan, cert_pem, key_pem, local_port)
     except CertRejected:
         # The only failure a fresh certificate can fix, and only worth a
         # second pass when the certificate wasn't freshly minted already.
         if existing_leaf is None:
             raise
         _LOGGER.debug("Reused leaf rejected by %s; re-minting and retrying", host)
-        cert_pem, key_pem = _mint_credentials(ca_cert_pem, ca_key_pem)
-        info = _handshake_and_read(host, scan, cert_pem, key_pem)
+        cert_pem, key_pem = _mint_preferred(ca_cert_pem, ca_key_pem)
+        info = _handshake_and_read(host, scan, cert_pem, key_pem, local_port)
 
     return {**info, "leaf_cert_pem": cert_pem, "leaf_key_pem": key_pem}
+
+
+def _probe_psk(host: str, identity: str, key: str, local_port: int | None = None) -> dict:
+    """Authenticate with an imported pre-shared key and resolve the device.
+
+    `identity` and `key` are already normalized (credentials.normalize_psk_*).
+    The authenticated `/oic/d` di is required here, not merely recorded:
+    it is the only binding a PSK entry has, and an entry created without
+    one would have nothing for the coordinator's check to compare against
+    (#435).
+    """
+    scan = probing.look(host)
+    info = _handshake_and_read(host, scan, None, None, local_port, psk=psk_provider(identity, key))
+    if info["ocf_device_id"] is None:
+        raise IdentityUnproven(f"{host} authenticated but reported no usable /oic/d di")
+    return info
 
 
 class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
@@ -821,6 +1027,39 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         self._ca_cert_pem: str = ""
         self._ca_key_pem: str = ""
         self._pending_info: dict | None = None
+        self._error_placeholders: dict[str, str] = {}
+        # Set only on the 8888 branch (issue #168): the leaf minted before
+        # the token step, since that step's own requests need it, and the
+        # token once it is in hand.
+        self._legacy_leaf: tuple[str, str] | None = None
+        self._legacy_token: str = ""
+        # The form a token exchange returns to: "legacy_token" when adding
+        # an appliance, "reauth_confirm" when its token stopped working.
+        self._legacy_step: str = "legacy_token"
+        self._legacy_cert_rejected = False
+        self._token_task: asyncio.Task[str | None] | None = None
+        # Set only on the PSK branch: the imported credential as it is
+        # stored, and what plaintext doxm hinted before the menu.
+        self._psk: dict[str, str] | None = None
+        # The appliance's plaintext port from the probe the certificate was
+        # refused on, for reading its doxm (#540).
+        self._plaintext_port: int | None = None
+        self._credential_hint = probing.CredentialHint()
+
+    def _setup_source_port(self, host: str) -> int | None:
+        """The fixed source port to handshake from, or None for an ephemeral one.
+
+        Fixed whenever no entry exists for `host`, so repeated setup attempts
+        replace one peer on the appliance instead of each leaving another
+        behind (issue #504). An existing entry's coordinator may be dialling
+        from that same port, and the library binds it with SO_REUSEADDR, so a
+        second socket there would share its address pair and our ClientHello
+        would tear down its live session.
+        """
+        entries = self.hass.config_entries.async_entries(DOMAIN)
+        if any(entry.data.get(CONF_HOST) == host for entry in entries):
+            return None
+        return local_source_port(host)
 
     @staticmethod
     @callback
@@ -839,26 +1078,53 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
         """
         from .registry.identity import device_display_name
 
+        # A PSK entry carries no certificate fields at all, not empty ones:
+        # credentials.py refuses an entry holding both kinds.
+        credential = self._psk or {
+            CONF_CA_CERT_PEM: self._ca_cert_pem,
+            CONF_CA_KEY_PEM: self._ca_key_pem,
+            CONF_LEAF_CERT_PEM: info["leaf_cert_pem"],
+            CONF_LEAF_KEY_PEM: info["leaf_key_pem"],
+        }
         return self.async_create_entry(
             title=f"{device_display_name(info['device_type_name'], '')} ({self._host})",
             data={
                 CONF_HOST: self._host,
                 CONF_PORT: info["port"],
-                CONF_CA_CERT_PEM: self._ca_cert_pem,
-                CONF_CA_KEY_PEM: self._ca_key_pem,
-                CONF_LEAF_CERT_PEM: info["leaf_cert_pem"],
-                CONF_LEAF_KEY_PEM: info["leaf_key_pem"],
+                **credential,
                 CONF_DEVICE_KEY: info["device_key"],
+                **(
+                    {CONF_OCF_DEVICE_ID: info["ocf_device_id"]}
+                    if info["ocf_device_id"] is not None
+                    else {}
+                ),
+                **({CONF_MAC: info["mac"]} if info["mac"] is not None else {}),
                 CONF_SERIAL: info["serial"],
                 CONF_MODEL: info["model"],
                 CONF_MANUFACTURER: info["manufacturer"],
                 CONF_DEVICE_TYPE: info["device_type_name"],
+                **(
+                    {
+                        CONF_TRANSPORT: TRANSPORT_LEGACY_HTTP,
+                        CONF_DEVICE_TOKEN: self._legacy_token,
+                        CONF_LEGACY_FAMILY: info.get("description", ""),
+                    }
+                    if self._legacy_token
+                    else {}
+                ),
             },
         )
 
     async def async_step_user(self, user_input: dict[str, Any] | None = None) -> ConfigFlowResult:
         existing = self.hass.config_entries.async_entries(DOMAIN)
-        has_creds = bool(existing)
+        # Only certificate entries have a leaf and CA to reuse; a PSK is
+        # per-appliance and says nothing about the next one.
+        certificate_entries = [
+            entry
+            for entry in existing
+            if entry.data.get(CONF_AUTH_CARRIER, AUTH_CERTIFICATE) == AUTH_CERTIFICATE
+        ]
+        has_creds = bool(certificate_entries)
 
         errors: dict[str, str] = {}
 
@@ -866,17 +1132,30 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             self._host = user_input[CONF_HOST].strip()
             existing_leaf = None
             if has_creds:
-                self._ca_cert_pem = existing[0].data[CONF_CA_CERT_PEM]
-                self._ca_key_pem = existing[0].data[CONF_CA_KEY_PEM]
-                leaf_cert = existing[0].data.get(CONF_LEAF_CERT_PEM)
-                leaf_key = existing[0].data.get(CONF_LEAF_KEY_PEM)
+                # Reuse an existing entry's credentials. Prefer one that has
+                # an AC14K_M CA stored, so a chain-validating appliance added
+                # after a self-signed one still finds that CA and doesn't send
+                # the user back to re-paste it. Fall back to the first entry
+                # (all self-signed) otherwise. Its already-minted leaf is what
+                # actually gets reused first -- every appliance accepts the
+                # same leaf -- and the CA only matters if that leaf is refused.
+                source = next(
+                    (e for e in certificate_entries if e.data.get(CONF_CA_CERT_PEM)),
+                    certificate_entries[0],
+                )
+                self._ca_cert_pem = source.data.get(CONF_CA_CERT_PEM, "")
+                self._ca_key_pem = source.data.get(CONF_CA_KEY_PEM, "")
+                leaf_cert = source.data.get(CONF_LEAF_CERT_PEM)
+                leaf_key = source.data.get(CONF_LEAF_KEY_PEM)
                 if leaf_cert and leaf_key:
                     existing_leaf = (leaf_cert, leaf_key)
             else:
-                # Normalized here, not just before minting: this is also
-                # what gets stored and reused to re-mint the leaf later.
-                self._ca_cert_pem = _normalize_pem(user_input[CONF_CA_CERT_PEM])
-                self._ca_key_pem = _normalize_pem(user_input[CONF_CA_KEY_PEM])
+                # No credentials up front: default to a self-signed leaf,
+                # which the AC14K_M-generation appliances accept. The AC14K_M
+                # CA is only requested if this device rejects it, in
+                # async_step_fallback_ca.
+                self._ca_cert_pem = ""
+                self._ca_key_pem = ""
 
             try:
                 info = await self.hass.async_add_executor_job(
@@ -885,66 +1164,315 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
                     self._ca_cert_pem,
                     self._ca_key_pem,
                     existing_leaf,
+                    self._setup_source_port(self._host),
                 )
+            except LegacyHttpFamily:
+                # The washer authenticates nothing about the certificate (a
+                # TP6X_WW6500 answers any leaf 200), so the token step comes
+                # first; fallback_ca is offered only if the token callback
+                # refuses the leaf, as the TP6X_RAC appears to (#524).
+                try:
+                    self._legacy_leaf = existing_leaf or await self.hass.async_add_executor_job(
+                        _mint_preferred, self._ca_cert_pem, self._ca_key_pem
+                    )
+                except (CannotConnect, InvalidCA) as exc:
+                    _LOGGER.warning(
+                        "Minting for %s failed [%s]: %s", self._host, exc.error_key, exc
+                    )
+                    errors["base"] = exc.error_key
+                else:
+                    return await self.async_step_legacy_token()
+            except CertRejected as exc:
+                self._plaintext_port = exc.plaintext_port
+                # The self-signed leaf (or a reused one, re-minted and refused
+                # again) didn't authenticate. Either this device validates the
+                # chain and wants AC14K_M, or it isn't on the certificate
+                # carrier at all and wants a pre-shared key (#435).
+                _LOGGER.debug("%s rejected the automatic certificate", self._host)
+                return await self.async_step_credential()
             except (CannotConnect, InvalidCA) as exc:
                 # Every probe failure carries the message that fits it (see
                 # CannotConnect); the log line is where the specifics live.
                 _LOGGER.warning("Probe of %s failed [%s]: %s", self._host, exc.error_key, exc)
                 errors["base"] = exc.error_key
+                self._error_placeholders = getattr(exc, "placeholders", {})
             except Exception:
                 _LOGGER.exception("Unexpected error during device probe")
                 errors["base"] = "unknown"
             else:
-                # An entry created before v4 still carries the serial-keyed
-                # unique_id until its first *live* poll adopts the UUID
-                # (coordinator._resolve_identity) -- which can be a long
-                # while for an appliance that is off, since an entry loads
-                # from its snapshot in the meantime (issue #295). The UUID
-                # check below can't see such an entry, so re-adding this
-                # very appliance during that window would be waved through
-                # as a second entry; the two would then collide the moment
-                # the older one re-keyed, and rekey_entry resolves a
-                # collision by *deleting* the duplicate rows -- taking the
-                # original entry's entity_ids, history and automations with
-                # them. Matched on the legacy key together with the host, so
-                # issue #381's two units (same serial, different addresses)
-                # stay separable.
-                legacy_unique_id = f"localthings_{info['serial']}"
-                if any(
-                    other.unique_id == legacy_unique_id
-                    and other.data.get(CONF_HOST) == self._host
-                    and CONF_DEVICE_KEY not in other.data
-                    for other in existing
-                ):
-                    return self.async_abort(reason="already_configured")
-                # Keyed on the OCF device UUID rather than the serialNum
-                # (issue #381): two units of a model that ship the same
-                # well-formed serial are indistinguishable here otherwise,
-                # and the second one is turned away as already configured.
-                await self.async_set_unique_id(f"localthings_{info['device_key']}")
-                self._abort_if_unique_id_configured()
-                if info["device_type_recognized"]:
-                    return self._create_entry(info)
-                self._pending_info = info
-                return await self.async_step_confirm_unknown_type()
+                return await self._finish_probe(info, existing)
 
-        if has_creds:
-            schema = vol.Schema({vol.Required(CONF_HOST): _TEXT})
-            step_id = "user_reuse"
-        else:
-            schema = vol.Schema(
-                {
-                    vol.Required(CONF_HOST): _TEXT,
-                    vol.Required(CONF_CA_CERT_PEM): _MULTILINE,
-                    vol.Required(CONF_CA_KEY_PEM): _MULTILINE,
-                }
-            )
-            step_id = "user"
+        # Both the first device and every later one now ask only for the host:
+        # the first tries self-signed, later ones reuse the stored leaf. The
+        # step_id still distinguishes them so their form text can differ.
+        schema = vol.Schema({vol.Required(CONF_HOST): _TEXT})
+        step_id = "user_reuse" if has_creds else "user"
 
         return self.async_show_form(
             step_id=step_id,
             data_schema=self.add_suggested_values_to_schema(schema, user_input),
             errors=errors,
+            description_placeholders={
+                "model": "unknown",
+                "port": "unknown",
+                **self._error_placeholders,
+            },
+        )
+
+    async def _finish_probe(
+        self, info: dict, existing: list[config_entries.ConfigEntry]
+    ) -> ConfigFlowResult:
+        """Turn a successful probe into an entry (or a confirm/abort).
+
+        Shared by async_step_user and async_step_fallback_ca so the identity
+        de-duplication runs identically whichever credential authenticated.
+        """
+        # An entry created before v4 still carries the serial-keyed
+        # unique_id until its first *live* poll adopts the UUID
+        # (coordinator._resolve_identity) -- which can be a long while for an
+        # appliance that is off, since an entry loads from its snapshot in the
+        # meantime (issue #295). The UUID check below can't see such an entry,
+        # so re-adding this very appliance during that window would be waved
+        # through as a second entry; the two would then collide the moment the
+        # older one re-keyed, and rekey_entry resolves a collision by
+        # *deleting* the duplicate rows -- taking the original entry's
+        # entity_ids, history and automations with them. Matched on the legacy
+        # key together with the host, so issue #381's two units (same serial,
+        # different addresses) stay separable.
+        legacy_unique_id = f"localthings_{info['serial']}"
+        if any(
+            other.unique_id == legacy_unique_id
+            and other.data.get(CONF_HOST) == self._host
+            and CONF_DEVICE_KEY not in other.data
+            for other in existing
+        ):
+            return self.async_abort(reason="already_configured")
+        # Keyed on the OCF device UUID rather than the serialNum (issue #381):
+        # two units of a model that ship the same well-formed serial are
+        # indistinguishable here otherwise, and the second one is turned away
+        # as already configured.
+        await self.async_set_unique_id(f"localthings_{info['device_key']}")
+        self._abort_if_unique_id_configured()
+        if info["device_type_recognized"]:
+            return self._create_entry(info)
+        self._pending_info = info
+        return await self.async_step_confirm_unknown_type()
+
+    async def async_step_fallback_ca(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask for the AC14K_M CA after a device rejects the self-signed leaf.
+
+        Reached from the credential menu, or from the 8888 token exchange
+        when the appliance's callback refused the self-signed leaf (#524).
+        DTLS-side, it is kept for an appliance that checks the chain against
+        AC14K_M, though none has been confirmed since the self-signed default
+        landed (#435). The pasted CA cert and key mint a chain-signed leaf,
+        which is then stored on the entry so the retry is never needed again
+        for this appliance. A DTLS refusal goes back to a menu
+        (async_step_ca_rejected), since a PSK appliance refuses every CA.
+        """
+        existing = self.hass.config_entries.async_entries(DOMAIN)
+        errors: dict[str, str] = {}
+        if user_input is None and self._legacy_cert_rejected:
+            errors["base"] = "callback_cert_rejected"
+
+        if user_input is not None:
+            # Normalized here, not just before minting: this is also what gets
+            # stored and reused to re-mint the leaf later.
+            self._ca_cert_pem = _normalize_pem(user_input[CONF_CA_CERT_PEM])
+            self._ca_key_pem = _normalize_pem(user_input[CONF_CA_KEY_PEM])
+            if self._legacy_cert_rejected:
+                if (result := await self._legacy_retry_with_ca(errors)) is not None:
+                    return result
+            else:
+                try:
+                    info = await self.hass.async_add_executor_job(
+                        _probe_and_validate,
+                        self._host,
+                        self._ca_cert_pem,
+                        self._ca_key_pem,
+                        None,
+                        self._setup_source_port(self._host),
+                    )
+                except CertRejected as exc:
+                    _LOGGER.warning("Probe of %s failed [%s]: %s", self._host, exc.error_key, exc)
+                    return await self.async_step_ca_rejected()
+                except (CannotConnect, InvalidCA) as exc:
+                    _LOGGER.warning("Probe of %s failed [%s]: %s", self._host, exc.error_key, exc)
+                    errors["base"] = exc.error_key
+                    self._error_placeholders = getattr(exc, "placeholders", {})
+                except Exception:
+                    _LOGGER.exception("Unexpected error during device probe")
+                    errors["base"] = "unknown"
+                else:
+                    return await self._finish_probe(info, existing)
+
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_CA_CERT_PEM): _MULTILINE,
+                vol.Required(CONF_CA_KEY_PEM): _MULTILINE,
+            }
+        )
+        return self.async_show_form(
+            step_id="fallback_ca",
+            data_schema=self.add_suggested_values_to_schema(schema, user_input),
+            errors=errors,
+            description_placeholders={
+                "host": self._host,
+                "model": "unknown",
+                "port": "unknown",
+                **self._error_placeholders,
+            },
+        )
+
+    async def _legacy_retry_with_ca(self, errors: dict[str, str]) -> ConfigFlowResult | None:
+        """Mint an AC14K_M-signed leaf and rerun the token exchange with it.
+
+        The listener presents the whole chain, as the manual `openssl
+        s_server -cert_chain` workaround in #524 did. Returns None, with
+        `errors` filled in, when the CA cannot mint.
+        """
+        try:
+            self._legacy_leaf = await self.hass.async_add_executor_job(
+                _mint_credentials, self._ca_cert_pem, self._ca_key_pem
+            )
+        except (CannotConnect, InvalidCA) as exc:
+            _LOGGER.warning("Minting for %s failed [%s]: %s", self._host, exc.error_key, exc)
+            errors["base"] = exc.error_key
+            return None
+        self._legacy_cert_rejected = False
+        return await self.async_step_legacy_token_exchange()
+
+    async def async_step_credential(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Choose the next credential after the automatic certificate is refused.
+
+        Every option stays offered. Plaintext doxm only decides what the
+        description says, because it is unauthenticated. The AC14K_M CA goes
+        last on every menu: no appliance that refused the self-signed leaf
+        has been reported to accept it (#435, #494, #520).
+        """
+        self._credential_hint = await self.hass.async_add_executor_job(
+            probing.read_credential_hint, self._host, self._plaintext_port
+        )
+        if self._credential_hint.suggests_psk:
+            return await self.async_step_credential_psk()
+        return self.async_show_menu(
+            step_id="credential",
+            menu_options=["psk_owner", "psk_peer", "fallback_ca"],
+            description_placeholders=self._psk_placeholders(),
+        )
+
+    async def async_step_credential_psk(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The same choice, described as PSK, when doxm says the device takes one."""
+        return self.async_show_menu(
+            step_id="credential_psk",
+            menu_options=["psk_owner", "psk_peer", "fallback_ca"],
+            description_placeholders=self._psk_placeholders(),
+        )
+
+    async def async_step_ca_rejected(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """The pasted CA was refused too: another CA, or a pre-shared key.
+
+        A menu rather than the CA form again, so an appliance that was never
+        on the certificate carrier doesn't leave the user stuck pasting CAs.
+        """
+        return self.async_show_menu(
+            step_id="ca_rejected",
+            menu_options=["psk_owner", "psk_peer", "fallback_ca"],
+            description_placeholders=self._psk_placeholders(),
+        )
+
+    def _psk_placeholders(self) -> dict[str, str]:
+        return {"host": self._host, "issue_url": PSK_TRACKING_ISSUE_URL}
+
+    async def async_step_psk_owner(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Import an OwnerPSK: the identity is the OCF owner's UUID."""
+        return await self._psk_step(PSK_PROFILE_OWNER, user_input)
+
+    async def async_step_psk_peer(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Import a pairwise peer PSK installed alongside Samsung's ownership."""
+        return await self._psk_step(PSK_PROFILE_PEER, user_input)
+
+    async def _psk_step(self, profile: str, user_input: dict[str, Any] | None) -> ConfigFlowResult:
+        """Validate an imported identity and key against the appliance.
+
+        Acquisition happens outside LocalThings (#435, decision 1); this only
+        proves the credential works and records which device holds it.
+        """
+        step_id = f"psk_{profile}"
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            identity = key = None
+            try:
+                identity = normalize_psk_identity(user_input[CONF_PSK_IDENTITY])
+            except PskIdentityZeroByte:
+                errors[CONF_PSK_IDENTITY] = "psk_identity_zero_byte"
+            except InvalidCredentialConfig:
+                errors[CONF_PSK_IDENTITY] = "invalid_psk_identity"
+            try:
+                key = normalize_psk_key(user_input[CONF_PSK_KEY])
+            except InvalidCredentialConfig:
+                errors[CONF_PSK_KEY] = "invalid_psk_key"
+
+            if identity is not None and key is not None:
+                try:
+                    info = await self.hass.async_add_executor_job(
+                        _probe_psk, self._host, identity, key, self._setup_source_port(self._host)
+                    )
+                except CannotConnect as exc:
+                    _LOGGER.warning(
+                        "PSK probe of %s failed [%s]: %s", self._host, exc.error_key, exc
+                    )
+                    errors["base"] = exc.error_key
+                    self._error_placeholders = getattr(exc, "placeholders", {})
+                except Exception:
+                    _LOGGER.exception("Unexpected error during PSK probe")
+                    errors["base"] = "unknown"
+                else:
+                    self._psk = {
+                        CONF_AUTH_CARRIER: AUTH_PSK,
+                        CONF_PSK_PROFILE: profile,
+                        CONF_PSK_IDENTITY: identity,
+                        CONF_PSK_KEY: key,
+                    }
+                    return await self._finish_probe(
+                        info, self.hass.config_entries.async_entries(DOMAIN)
+                    )
+
+        suggested: dict[str, Any] = {}
+        if user_input is not None:
+            # The key is never echoed back into the form.
+            suggested = {CONF_PSK_IDENTITY: user_input.get(CONF_PSK_IDENTITY, "")}
+        elif identity_may_be_suggested_from_doxm(profile) and self._credential_hint.owner_uuid:
+            suggested = {CONF_PSK_IDENTITY: self._credential_hint.owner_uuid}
+        schema = vol.Schema(
+            {
+                vol.Required(CONF_PSK_IDENTITY): _TEXT,
+                vol.Required(CONF_PSK_KEY): _PASSWORD,
+            }
+        )
+        return self.async_show_form(
+            step_id=step_id,
+            data_schema=self.add_suggested_values_to_schema(schema, suggested),
+            errors=errors,
+            description_placeholders={
+                **self._psk_placeholders(),
+                "model": "unknown",
+                "port": "unknown",
+                **self._error_placeholders,
+            },
         )
 
     async def async_step_user_reuse(
@@ -952,6 +1480,135 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
     ) -> ConfigFlowResult:
         """Handle the localized host-only form for additional appliances."""
         return await self.async_step_user(user_input)
+
+    async def async_step_legacy_token(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Get the device token the 8888 bridge needs (issue #168).
+
+        A pasted token is used as-is. An empty field asks the appliance to
+        issue one, which it posts back to a listener on port 8889 -- see
+        async_step_legacy_token_exchange.
+        """
+        if user_input is not None:
+            return await self._legacy_submit(user_input)
+        return self._legacy_token_form()
+
+    async def async_step_reauth(self, entry_data: Mapping[str, Any]) -> ConfigFlowResult:
+        """The 8888 bridge refused this entry's device token (a 401)."""
+        if entry_data.get(CONF_TRANSPORT) != TRANSPORT_LEGACY_HTTP:
+            return self.async_abort(reason="reauth_unsupported")
+        self._host = entry_data[CONF_HOST]
+        self._legacy_leaf = (entry_data[CONF_LEAF_CERT_PEM], entry_data[CONF_LEAF_KEY_PEM])
+        self._ca_cert_pem = entry_data.get(CONF_CA_CERT_PEM, "")
+        self._ca_key_pem = entry_data.get(CONF_CA_KEY_PEM, "")
+        self._legacy_step = "reauth_confirm"
+        return await self.async_step_reauth_confirm()
+
+    async def async_step_reauth_confirm(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        if user_input is not None:
+            return await self._legacy_submit(user_input)
+        return self._legacy_token_form()
+
+    async def async_step_legacy_token_exchange(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Ask the appliance for a token and wait for its callback.
+
+        Up to a minute and a half, so it runs as a progress step rather than
+        holding the form's submit open.
+        """
+        if self._token_task is None:
+            assert self._legacy_leaf is not None
+            cert_pem, key_pem = self._legacy_leaf
+            self._token_task = self.hass.async_create_task(self._request_token(cert_pem, key_pem))
+        if not self._token_task.done():
+            return self.async_show_progress(
+                step_id="legacy_token_exchange",
+                progress_action="legacy_token",
+                progress_task=self._token_task,
+                description_placeholders={"host": self._host},
+            )
+        return self.async_show_progress_done(next_step_id="legacy_token_received")
+
+    async def _request_token(self, cert_pem: str, key_pem: str) -> str | None:
+        return await self.hass.async_add_executor_job(
+            obtain_device_token, self._host, LEGACY_HTTP_PORT, cert_pem, key_pem
+        )
+
+    async def async_step_legacy_token_received(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        task, self._token_task = self._token_task, None
+        try:
+            token = task.result() if task is not None else None
+        except CallbackPortUnavailable as err:
+            _LOGGER.warning("Token callback port for %s unavailable: %s", self._host, err)
+            return self._legacy_token_form({"base": "callback_port_in_use"})
+        except CallbackCertRejected as err:
+            _LOGGER.warning("Token callback from %s refused the certificate: %s", self._host, err)
+            if self._ca_cert_pem:
+                # Already an AC14K_M-signed leaf; another CA is a guess.
+                return self._legacy_token_form({"base": "callback_ca_rejected"})
+            self._legacy_cert_rejected = True
+            return await self.async_step_fallback_ca()
+        except OSError as err:
+            _LOGGER.warning("Token request to %s failed: %s", self._host, err)
+            return self._legacy_token_form({"base": "cannot_connect"})
+        if not token:
+            return self._legacy_token_form({"base": TokenNotReceived.error_key})
+        return await self._finish_legacy(token)
+
+    async def _legacy_submit(self, user_input: dict[str, Any]) -> ConfigFlowResult:
+        token = (user_input.get(CONF_DEVICE_TOKEN) or "").strip()
+        if not token:
+            return await self.async_step_legacy_token_exchange()
+        return await self._finish_legacy(token)
+
+    async def _finish_legacy(self, token: str) -> ConfigFlowResult:
+        """Read the appliance with `token`, then add it or update its entry."""
+        assert self._legacy_leaf is not None
+        cert_pem, key_pem = self._legacy_leaf
+        try:
+            info = await self.hass.async_add_executor_job(
+                _probe_legacy, self._host, cert_pem, key_pem, token
+            )
+        except AuthRejected:
+            return self._legacy_token_form({"base": "invalid_token"})
+        except (CannotConnect, InvalidCA) as exc:
+            _LOGGER.warning("Setup of %s over 8888 failed [%s]: %s", self._host, exc.error_key, exc)
+            return self._legacy_token_form({"base": exc.error_key})
+        except Exception:
+            _LOGGER.exception("Unexpected error setting up %s over 8888", self._host)
+            return self._legacy_token_form({"base": "unknown"})
+        if self.source == SOURCE_REAUTH:
+            entry = self._get_reauth_entry()
+            if not _identity_matches(entry, info, self._host):
+                return self._legacy_token_form({"base": "wrong_device"})
+            # The leaf too: fallback_ca may have replaced it with a CA-signed one.
+            return self.async_update_reload_and_abort(
+                entry,
+                data_updates={
+                    CONF_DEVICE_TOKEN: token,
+                    CONF_LEAF_CERT_PEM: cert_pem,
+                    CONF_LEAF_KEY_PEM: key_pem,
+                    CONF_CA_CERT_PEM: self._ca_cert_pem,
+                    CONF_CA_KEY_PEM: self._ca_key_pem,
+                },
+            )
+        self._legacy_token = token
+        info = {**info, "leaf_cert_pem": cert_pem, "leaf_key_pem": key_pem}
+        return await self._finish_probe(info, self.hass.config_entries.async_entries(DOMAIN))
+
+    def _legacy_token_form(self, errors: dict[str, str] | None = None) -> ConfigFlowResult:
+        return self.async_show_form(
+            step_id=self._legacy_step,
+            data_schema=vol.Schema({vol.Optional(CONF_DEVICE_TOKEN, default=""): _TEXT}),
+            errors=errors or {},
+            description_placeholders={"host": self._host},
+        )
 
     async def async_step_confirm_unknown_type(
         self, user_input: dict[str, Any] | None = None
@@ -969,6 +1626,229 @@ class LocalThingsConfigFlow(config_entries.ConfigFlow, domain=DOMAIN):
             # this step asks for can quote it without digging through logs.
             description_placeholders={"model": info.get("model") or "unknown"},
         )
+
+    async def async_step_dhcp(self, discovery_info: DhcpServiceInfo) -> ConfigFlowResult:
+        """Follow a configured appliance whose DHCP lease moved (issue #469).
+
+        Home Assistant only sends these for a MAC already in the device
+        registry under this domain -- the manifest's `registered_devices`
+        matcher -- so there is never a new appliance to set up here. The MAC
+        is the only field of a sighting that identifies a unit: an address
+        is what we're being told has changed, and three of #469's air
+        conditioners answer to one hostname.
+        """
+        mac = format_mac(discovery_info.macaddress)
+        entry = next(
+            (
+                other
+                for other in self.hass.config_entries.async_entries(DOMAIN)
+                if (stored := other.data.get(CONF_MAC)) and format_mac(stored) == mac
+            ),
+            None,
+        )
+        if entry is None or entry.unique_id is None:
+            # The registry carries this MAC or HA would not have matched it,
+            # so the entry behind it predates CONF_MAC being stored. It picks
+            # the address up on its next successful poll instead.
+            _LOGGER.debug("DHCP sighting of %s matches no entry that stores a MAC", mac)
+            return self.async_abort(reason="no_entry_for_mac")
+
+        await self.async_set_unique_id(entry.unique_id)
+        # The address the title names moves with the entry; one the user has
+        # made their own stays as it is (see _followed_title). Separate from
+        # the update below because `updates` writes entry data only.
+        if (title := _followed_title(entry, discovery_info.ip)) is not UNDEFINED:
+            self.hass.config_entries.async_update_entry(entry, title=title)
+        # Writes the new host and schedules a reload when the address moved.
+        # When it hasn't, the sighting still reloads an entry sitting in
+        # SETUP_RETRY -- Home Assistant's own handling for a discovery
+        # source, and the "this appliance is back on the network" signal a
+        # poll of an unreachable device can't produce (issue #295).
+        self._abort_if_unique_id_configured(updates={CONF_HOST: discovery_info.ip})
+        return self.async_abort(reason="already_configured")
+
+    async def async_step_reconfigure(
+        self, user_input: dict[str, Any] | None = None
+    ) -> ConfigFlowResult:
+        """Move an entry to a new address by hand.
+
+        Without this the only way to correct an address is deleting the
+        entry and adding it back, which takes its entity_ids, history and
+        automations with it (issue #469). It is also how an entry too old to
+        have a stored MAC gets one, after which a moved lease is followed
+        automatically.
+
+        Nothing else is editable here: the CA credentials are install-wide
+        (see async_step_user) and every other stored field is the device's
+        own answer, refreshed by the probe below.
+        """
+        entry = self._get_reconfigure_entry()
+        errors: dict[str, str] = {}
+
+        if user_input is not None:
+            host = user_input[CONF_HOST].strip()
+            leaf_cert = entry.data.get(CONF_LEAF_CERT_PEM)
+            leaf_key = entry.data.get(CONF_LEAF_KEY_PEM)
+            info: dict[str, Any]
+            try:
+                if authentication_carrier(entry.data) == AUTH_PSK:
+                    info = await self.hass.async_add_executor_job(
+                        _probe_psk,
+                        host,
+                        *psk_credentials(entry.data),
+                        self._setup_source_port(host),
+                    )
+                elif entry.data.get(CONF_TRANSPORT) == TRANSPORT_LEGACY_HTTP:
+                    info = await self.hass.async_add_executor_job(
+                        _probe_legacy, host, leaf_cert, leaf_key, entry.data[CONF_DEVICE_TOKEN]
+                    )
+                    info = {
+                        **info,
+                        "port": LEGACY_HTTP_PORT,
+                        "leaf_cert_pem": leaf_cert,
+                        "leaf_key_pem": leaf_key,
+                    }
+                else:
+                    info = await self.hass.async_add_executor_job(
+                        _probe_and_validate,
+                        host,
+                        entry.data.get(CONF_CA_CERT_PEM, ""),
+                        entry.data.get(CONF_CA_KEY_PEM, ""),
+                        (leaf_cert, leaf_key) if leaf_cert and leaf_key else None,
+                        self._setup_source_port(host),
+                    )
+            except (LegacyHttpFamily, AuthRejected):
+                # An 8888 appliance where a DTLS one was, or one that refuses
+                # this entry's token: either way not this entry's appliance
+                # as it knows it.
+                errors["base"] = "wrong_device"
+            except (CannotConnect, InvalidCA) as exc:
+                _LOGGER.warning("Probe of %s failed [%s]: %s", host, exc.error_key, exc)
+                errors["base"] = exc.error_key
+                self._error_placeholders = getattr(exc, "placeholders", {})
+            except Exception:
+                _LOGGER.exception("Unexpected error during device probe")
+                errors["base"] = "unknown"
+            else:
+                matches = _identity_matches(entry, info, host)
+                if authentication_carrier(entry.data) == AUTH_PSK:
+                    # The authenticated di is a PSK entry's only binding, so
+                    # it has to match outright (#435).
+                    matches = matches and (
+                        check_device_binding(
+                            entry.data.get(CONF_OCF_DEVICE_ID), info["ocf_device_id"]
+                        )
+                        is DeviceBinding.MATCHED
+                    )
+                if not matches:
+                    _LOGGER.warning(
+                        "%s answered as %r, but this entry is registered as %r",
+                        host,
+                        info["device_key"],
+                        entry.data.get(CONF_DEVICE_KEY) or entry.data.get(CONF_SERIAL),
+                    )
+                    errors["base"] = "wrong_device"
+                else:
+                    return self.async_update_reload_and_abort(
+                        entry,
+                        title=_followed_title(entry, host),
+                        data_updates={
+                            CONF_HOST: host,
+                            # The port is probed, not typed, and a device that
+                            # moved may well answer on a different one.
+                            CONF_PORT: info["port"],
+                            # A PSK entry keeps its credential and gains no
+                            # certificate fields (credentials.py refuses both).
+                            **(
+                                {
+                                    CONF_LEAF_CERT_PEM: info["leaf_cert_pem"],
+                                    CONF_LEAF_KEY_PEM: info["leaf_key_pem"],
+                                }
+                                if "leaf_cert_pem" in info
+                                else {}
+                            ),
+                            **({CONF_MAC: info["mac"]} if info["mac"] is not None else {}),
+                        },
+                    )
+
+        return self.async_show_form(
+            step_id="reconfigure",
+            data_schema=self.add_suggested_values_to_schema(
+                vol.Schema({vol.Required(CONF_HOST): _TEXT}),
+                user_input or {CONF_HOST: entry.data.get(CONF_HOST)},
+            ),
+            errors=errors,
+            description_placeholders={
+                # identity_unproven links the tracking issue.
+                "issue_url": PSK_TRACKING_ISSUE_URL,
+                "model": "unknown",
+                "port": "unknown",
+                **self._error_placeholders,
+            },
+        )
+
+
+def _host_keyed(entry: config_entries.ConfigEntry) -> bool:
+    """True for an entry registered against an address rather than an identity.
+
+    `resolve_serial` falls back to the host for a board whose serialNum is a
+    placeholder (issues #83/#189) and `resolve_device_key` falls back with
+    it, so such an entry's stored serial is an address -- which a real
+    serialNum never parses as. Asked of the stored serial rather than of the
+    current host because the two stop agreeing the moment the entry moves:
+    `_resolve_identity` never re-keys a board that reports no `di`, so the
+    key keeps naming the address the entry was created at.
+    """
+    try:
+        ipaddress.ip_address(entry.data.get(CONF_SERIAL) or "")
+    except ValueError:
+        return False
+    return True
+
+
+def _identity_matches(entry: config_entries.ConfigEntry, info: dict, host: str) -> bool:
+    """Whether the appliance that just answered at `host` is the one this
+    entry is for.
+
+    The same question `coordinator._resolve_identity` answers on a poll,
+    asked before the host is written rather than after: an address typed
+    with one digit wrong would otherwise hand this entry's registry rows --
+    its entity_ids, history and automations -- to whatever appliance lives
+    there. Structured to match that function so the two can't drift: the
+    registered key, else the serial corroborating a regenerated `di`, else
+    an entry with no identity to defend.
+    """
+    stored_serial = entry.data.get(CONF_SERIAL)
+    current_key = entry.data.get(CONF_DEVICE_KEY) or stored_serial or entry.data.get(CONF_HOST)
+    probed_key = info["device_key"]
+    # An address is not an identity and corroborates nothing -- the exclusion
+    # _resolve_identity makes with `polled_serial != host`. Both sides of
+    # these comparisons fall back to an address when the board reports no
+    # identity at all, and two of those would otherwise agree by
+    # construction rather than by being the same appliance.
+    if probed_key != host and probed_key == current_key:
+        return True
+    if stored_serial is not None and info["serial"] == stored_serial and info["serial"] != host:
+        return True
+    # Nothing to defend: a host-keyed entry is registered against whatever
+    # answers at its address -- what _resolve_identity does with it on every
+    # poll -- so no check here can be meaningful, and demanding one would
+    # strand exactly the boards that exception exists to rescue. It still
+    # takes an answer as identity-less as the entry is.
+    return stored_serial is None or (_host_keyed(entry) and probed_key == host)
+
+
+def _followed_title(entry: config_entries.ConfigEntry, host: str) -> str | UndefinedType:
+    """The entry title with the address it names brought up to date.
+
+    Titles are minted as "<device> (<host>)" but are also where a rename
+    lands, so only a title still ending in the old address is rewritten --
+    anything else the user has made their own and keeps.
+    """
+    suffix = f" ({entry.data.get(CONF_HOST)})"
+    if not entry.title.endswith(suffix):
+        return UNDEFINED
+    return f"{entry.title[: -len(suffix)]} ({host})"
 
 
 class LocalThingsOptionsFlow(config_entries.OptionsFlow):
@@ -1545,8 +2425,8 @@ class LocalThingsOptionsFlow(config_entries.OptionsFlow):
             # panel's href dropdown already lists actual hrefs off
             # coord.last_resources, and MAIN.to_actual is identity, so
             # this preserves the panel's existing behavior byte for byte.
-            dev = dr.async_get(self.hass).async_get_device(
-                identifiers=coord.device_info["identifiers"]
+            dev = find_entry_device(
+                self.hass, self.config_entry.entry_id, coord.device_info["identifiers"]
             )
             if dev is None:
                 return self.async_abort(reason="not_loaded")

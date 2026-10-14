@@ -10,10 +10,11 @@ cook time via /operational/state/vs/0's operationTime/remainingTime, mode
 select via /mode/vs/0.modes (mid-cook acceptance unknown), stop via
 state='Ready'.
 
-Cycle start is not implemented: local-OCF cycle start isn't reproducible on
-this firmware. Mode writes are also unreliable -- the oven rolls them back
-once a cycle is active, so OVEN_MODE's SelectDesc is effectively read-only
-in practice.
+Cycle start (issue #473) is one Collection write carrying mode, setpoint
+and cook time -- see cook.py. While a board that declares a startable mode
+is idle, the mode, setpoint and cook-time entities hold what is chosen and
+the start button sends it; mid-cook they write straight through, which the
+board keeps.
 """
 
 from datetime import UTC, datetime, timedelta
@@ -22,11 +23,13 @@ from ..batch import is_stub_rep
 from ..capability import Capability
 from ..entities import (
     BinarySensorDesc,
+    ButtonDesc,
     NumberDesc,
     SelectDesc,
     SensorDesc,
     SwitchDesc,
 )
+from . import cook
 from .common import normalize_temp_unit
 from .operational import STOP_BUTTON
 
@@ -85,17 +88,38 @@ def _int(v):
         return None
 
 
-def _finish_time(remaining_str):
-    if not remaining_str:
+def _percent(v):
+    """A 0-100 reading, else None: TP1X microwaves report a fixed 201 for
+    the whole of a running cook (#181)."""
+    value = _int(v)
+    return value if value is not None and 0 <= value <= 100 else None
+
+
+def _finish_time(rep):
+    """now() + remainingTime while a cook is running, rounded to the minute.
+
+    Same treatment as operational.py's _finish_time, for the same reason:
+    a range pushes /operational/state/vs/0 every few seconds during a cook
+    (progressPercentage ticks about once per 7-10 s), and its remainingTime
+    only has minute resolution with the seconds parked at ':59', so the
+    unrounded sum drifted by a few seconds per push and crossed the minute
+    boundary back and forth. That was one logbook entry per push (NX60T8311SS,
+    a 15-minute bake). The state gate covers boards that leave a stale
+    remainingTime after the cook ends; this one reports 00:00:00 there."""
+    if _to_ocf(rep.get("x.com.samsung.da.state")) != "active":
+        return None
+    remaining = rep.get("x.com.samsung.da.remainingTime")
+    if not remaining:
         return None
     try:
-        h, m, s = remaining_str.split(":")
+        h, m, s = remaining.split(":")
         total_s = int(h) * 3600 + int(m) * 60 + int(s)
-        if total_s == 0:
-            return None
-        return datetime.now(UTC) + timedelta(seconds=total_s)
-    except Exception:
+    except (AttributeError, ValueError):
         return None
+    if total_s == 0:
+        return None
+    finish = datetime.now(UTC) + timedelta(seconds=total_s)
+    return finish.replace(second=0, microsecond=0)
 
 
 def _op_minutes(op_time):
@@ -107,6 +131,38 @@ def _op_minutes(op_time):
         return int(h) * 60 + int(m) + (1 if int(s) > 0 else 0)
     except Exception:
         return None
+
+
+def _setpoint(desired):
+    """An idle oven reports desired='0' (NX60T8311SS/AA, #444), which HA
+    renders as -18 °C on a metric install once the unit is Fahrenheit. 0 is
+    below every SETPOINT_MIN_* bound, so it gets the same 0-means-unset
+    treatment as _finish_time above."""
+    v = _int(desired)
+    return None if v == 0 else v
+
+
+# Idle cavity value per unit: ranges floor `current` at Bake's tempMin (175 F
+# on every Fahrenheit range fixture, 80 C on the Celsius one), wall ovens
+# report 0. Neither is a measurement.
+_IDLE_FLOOR = {"°F": 175, "°C": 80}
+
+
+def _current_temp(rep):
+    """None while the oven is idle and `current` sits at or below the idle
+    floor. Both conditions matter: a cool-down after a cook (desired=0,
+    current above the floor) still reads, and a KeepWarm cook at exactly
+    175 F (desired=175) does too."""
+    items = rep.get("x.com.samsung.da.items") or []
+    if not items:
+        return None
+    current = _int(items[0].get("x.com.samsung.da.current"))
+    if current is None:
+        return None
+    idle = _setpoint(items[0].get("x.com.samsung.da.desired")) is None
+    if idle and current <= _IDLE_FLOOR.get(_oven_temp_unit(rep), 0):
+        return None
+    return current
 
 
 # ---------------------------------------------------------------------------
@@ -198,11 +254,41 @@ def _oven_mode_options(resources):
     fallback has to kick in when the device's own field is absent."""
     rep = resources.get("/mode/vs/0") or {}
     live = rep.get("x.com.samsung.da.supportedModes")
-    return list(live) if live else list(_OVEN_MODES)
+    # An empty list is a lower zone with its divider out (cook.share_mode_spec).
+    if not live and not cook.zoned(resources):
+        return list(_OVEN_MODES)
+    live = cook.selectable_modes(live or [])
+    # Ranges (every range fixture, plus #404's) and the #277 wall oven idle
+    # in NoOperation but leave it out of supportedModes; HA's select drops a
+    # current option that isn't in the list, so the idle state showed as
+    # Unknown. Listing it makes it selectable too, which _oven_mode_validate
+    # turns into a user-facing error rather than a silent no-op.
+    if "NoOperation" in live:
+        return live
+    return ["NoOperation", *live]
 
 
-def _oven_mode_write(p, rep, href=None):
-    valid = rep.get("x.com.samsung.da.supportedModes") or _OVEN_MODES
+def _oven_mode_validate(p, rep, resources):
+    """NoOperation is what the oven reports while idle; it is in the select
+    so the idle state displays, not because the oven accepts it as a mode
+    (#445 review). Picking it used to fall through to _oven_mode_write's
+    None and the coordinator's warning-and-return, so the user saw nothing
+    happen. Every other option in the list came from supportedModes and
+    passes."""
+    if p == "NoOperation":
+        return "oven_mode_idle_not_selectable"
+    return None
+
+
+def _oven_mode_write(p, rep, href=None, resources=None):
+    # The cavity's view, not its raw rep: a zoned lower cavity's modes come
+    # from the board's modeSpec (cook.share_mode_spec).
+    view = (resources or {}).get("/mode/vs/0") or rep
+    live = view.get("x.com.samsung.da.supportedModes")
+    if not live and not cook.zoned(resources or {}):
+        valid = _OVEN_MODES
+    else:
+        valid = cook.selectable_modes(live or [])
     if p not in valid:
         return None
     return ["mode", "vs", "0"], {"x.com.samsung.da.modes": [p]}
@@ -223,6 +309,33 @@ def _option_switch_write(prefix):
         }
 
     return write
+
+
+def _mode_setpoint_bounds(rep, resources):
+    """The current (or held) mode's own range from modeSpec; None falls
+    back to the static per-unit bounds below."""
+    bounds = cook.temp_bounds(resources)
+    return tuple(float(b) for b in bounds) if bounds else None
+
+
+def _cook_time_bounds(rep, resources):
+    """Before a start, the held mode's own time limits in whole minutes.
+    Mid-cook the static 0-1439 stays: those writes predate modeSpec and are
+    known to hold."""
+    if not cook.operation_ready(resources):
+        return None
+    spec = cook.mode_specs(resources).get(cook.current_mode(resources) or "")
+    if spec is None or spec.time_max is None:
+        return None
+    return float(-(-(spec.time_min or 0) // 60)), float(spec.time_max // 60), 1.0
+
+
+START_COOKING_BUTTON = ButtonDesc(
+    key="start_cooking",
+    icon="mdi:play",
+    cook_param=cook.PARAM_START,
+    exists_fn=cook.can_start,
+)
 
 
 # ---------------------------------------------------------------------------
@@ -248,12 +361,19 @@ OVEN_OPERATIONAL_STATE = Capability(
             device_class="running",
             value_fn=lambda v: _SAMSUNG_STATE_TO_OCF.get(v) == "active",
         ),
+        # Range firmware parks progressPercentage at 1 while Ready (every range
+        # fixture, the TP2X wall oven) and still reads 1 one second into a
+        # timed bake (#183's cook-started dump). Same not-active-means-0 rule
+        # as operational.py's shared sensor.
         SensorDesc(
             key="progress_percentage",
-            field="x.com.samsung.da.progressPercentage",
             unit="%",
             state_class="measurement",
-            value_fn=_int,
+            rep_fn=lambda rep: (
+                0
+                if _SAMSUNG_STATE_TO_OCF.get(rep.get("x.com.samsung.da.state")) != "active"
+                else _percent(rep.get("x.com.samsung.da.progressPercentage"))
+            ),
         ),
         SensorDesc(
             key="operation_time_minutes",
@@ -264,9 +384,9 @@ OVEN_OPERATIONAL_STATE = Capability(
         ),
         SensorDesc(
             key="finish_time",
-            field="x.com.samsung.da.remainingTime",
             device_class="timestamp",
-            value_fn=_finish_time,
+            hysteresis=True,
+            rep_fn=_finish_time,
         ),
         NumberDesc(
             key="cook_time",
@@ -276,10 +396,13 @@ OVEN_OPERATIONAL_STATE = Capability(
             native_max=1439,
             step=1.0,
             icon="mdi:timer",
+            bounds_fn=_cook_time_bounds,
             value_fn=_op_minutes,
             write_fn=_cook_time_write,
+            cook_param=cook.PARAM_DURATION,
         ),
         STOP_BUTTON,
+        START_COOKING_BUTTON,
     ),
 )
 
@@ -306,14 +429,63 @@ def _oven_temp_unit(rep):
     return normalize_temp_unit(unit, default="°C")
 
 
-def _setpoint_bounds(rep):
-    """(min, max, step) for the live unit -- see the SETPOINT_*_C/_F
-    constants above for provenance. Bounds must track the unit shown by
-    unit_fn (both read the same live rep), or the HA slider's range would
-    silently mismatch its own displayed unit."""
-    if _oven_temp_unit(rep) == "°F":
+_PROBE_ITEM_ID = "1"
+
+
+def _probe_item(rep):
+    """The food probe's entry in `/temperatures/vs/0`'s items[], or None.
+
+    Keyed by reported id, not position, so a board listing them the other
+    way round can't swap the two readings. That id 1 is the probe is
+    inferred from issue #490's dump, not confirmed: only the cavity with a
+    probe socket reports a second item, and it carries `increment` 1
+    against the cavity's 5.
+    """
+    for item in rep.get("x.com.samsung.da.items") or []:
+        if item.get("x.com.samsung.da.id") == _PROBE_ITEM_ID:
+            return item
+    return None
+
+
+def _probe_field(rep, field):
+    item = _probe_item(rep)
+    return _int(item.get(field)) if item else None
+
+
+def _probe_temp_unit(rep):
+    item = _probe_item(rep)
+    unit = item.get("x.com.samsung.da.unit") if item else None
+    return normalize_temp_unit(unit, default="°C")
+
+
+def _probe_connected(rep, resources):
+    """True only while a probe is actually plugged in.
+
+    The socket's state lives on a different resource -- `/mode/vs/0`'s
+    options[] carries a `meatprobe_<state>` token -- so an oven with a
+    socket and nothing in it reports a full items[1] reading 0, which as a
+    permanent entity is worse than no entity. Gated on "reports a state and
+    it isn't disconnected" rather than on the connected spelling, which no
+    dump has shown yet.
+    """
+    if _probe_item(rep) is None:
+        return False
+    mode = resources.get("/mode/vs/0") or {}
+    state = _option_value(mode.get("x.com.samsung.da.options"), "meatprobe")
+    return state is not None and state.lower() != "disconnected"
+
+
+def _bounds_for_unit(unit):
+    """(min, max, step) for `unit` -- see the SETPOINT_*_C/_F constants
+    above for provenance. Bounds must track the unit shown by unit_fn, or
+    the HA slider's range silently mismatches its own displayed unit."""
+    if unit == "°F":
         return SETPOINT_MIN_F, SETPOINT_MAX_F, SETPOINT_STEP_F
     return SETPOINT_MIN_C, SETPOINT_MAX_C, SETPOINT_STEP_C
+
+
+def _setpoint_bounds(rep):
+    return _bounds_for_unit(_oven_temp_unit(rep))
 
 
 OVEN_SETPOINT = Capability(
@@ -333,20 +505,158 @@ OVEN_SETPOINT = Capability(
             native_min_fn=lambda rep: float(_setpoint_bounds(rep)[0]),
             native_max_fn=lambda rep: float(_setpoint_bounds(rep)[1]),
             step_fn=lambda rep: float(_setpoint_bounds(rep)[2]),
-            value_fn=lambda items: _int(
+            bounds_fn=_mode_setpoint_bounds,
+            value_fn=lambda items: _setpoint(
                 items[0].get("x.com.samsung.da.desired") if items else None
             ),
             write_fn=_oven_setpoint_write,
+            cook_param=cook.PARAM_TEMPERATURE,
         ),
         SensorDesc(
             key="current_temp_c",
-            field="x.com.samsung.da.items",
             device_class="temperature",
             state_class="measurement",
             unit_fn=_oven_temp_unit,
-            value_fn=lambda items: _int(
-                items[0].get("x.com.samsung.da.current") if items else None
-            ),
+            rep_fn=_current_temp,
+        ),
+        # The food probe rides in the same items[] array as items[1], which
+        # was being dropped (issue #490 -- only items[0] was ever read).
+        # Read-only on purpose: nothing in the corpus shows a probe target
+        # write being accepted, and this family discards even ordinary
+        # setpoint writes from idle (docs/investigations/oven-cycle-start.md).
+        SensorDesc(
+            key="food_probe_temp",
+            device_class="temperature",
+            state_class="measurement",
+            unit_fn=_probe_temp_unit,
+            exists_fn=_probe_connected,
+            rep_fn=lambda rep: _probe_field(rep, "x.com.samsung.da.current"),
+        ),
+        SensorDesc(
+            key="food_probe_setpoint",
+            device_class="temperature",
+            unit_fn=_probe_temp_unit,
+            entity_category="diagnostic",
+            exists_fn=_probe_connected,
+            rep_fn=lambda rep: _probe_field(rep, "x.com.samsung.da.desired"),
+        ),
+    ),
+)
+
+# OCF-standard temperature pair, as a fallback behind the vendor array
+# above (issue #490): the ARTIK051 wall oven reports both, and the vendor
+# array is the superset there (unit, setpoint increment, cavity and probe
+# in one rep, and the only proven write contract). So these bind the hrefs
+# -- which is what keeps them out of `unbound_hrefs` -- but stand down
+# while it is present, as common.py's POWER_VS_FALLBACK does in reverse.
+#
+# Exact hrefs, not an href_prefix pattern: `discover()` only clears an
+# href that an exact-href capability claims, so a declining pattern cap
+# would leave the gap open. They share the vendor entities' keys, so at
+# most one materializes and the unique_ids match either way.
+
+_VENDOR_TEMPS_HREF = "/temperatures/vs/0"
+
+
+def _no_vendor_temps(rep, resources):
+    return _VENDOR_TEMPS_HREF not in resources
+
+
+def _ocf_temp_unit(rep):
+    """OCF's own `units` field ('C'/'F'), not the vendor `unit` spelling."""
+    return normalize_temp_unit(rep.get("units"), default="°C")
+
+
+def _ocf_setpoint_bounds(rep):
+    return _bounds_for_unit(_ocf_temp_unit(rep))
+
+
+def _ocf_probe_connected(rep, resources):
+    """The same socket gate `_probe_connected` applies to the vendor array,
+    read here off `/mode/vs/0` alone -- an empty socket reports a live 0 on
+    these hrefs too, and a permanent 0 degree probe is what the gate is
+    for."""
+    mode = resources.get("/mode/vs/0") or {}
+    state = _option_value(mode.get("x.com.samsung.da.options"), "meatprobe")
+    return state is not None and state.lower() != "disconnected"
+
+
+def _ocf_setpoint_write(p, rep, href=None):
+    """Write the OCF resource directly -- reached only on a board with no
+    vendor array to RMW, so there is no `/temperatures/vs/0` fallback to
+    prefer the way fridge.py's `_temp_setpoint_write` has. Unconfirmed on
+    hardware: no dump in the corpus has this pair without the vendor one.
+    """
+    if not href:
+        return None
+    return ([s for s in href.strip("/").split("/") if s], {"temperature": round(float(p))})
+
+
+OVEN_TEMP_CURRENT_OCF = Capability(
+    href="/temperature/current/cook/0",
+    match_fn=_no_vendor_temps,
+    poll_tier="hot",
+    entities=(
+        SensorDesc(
+            key="current_temp_c",
+            field="temperature",
+            device_class="temperature",
+            state_class="measurement",
+            unit_fn=_ocf_temp_unit,
+        ),
+    ),
+)
+
+OVEN_TEMP_DESIRED_OCF = Capability(
+    href="/temperature/desired/cook/0",
+    match_fn=_no_vendor_temps,
+    poll_tier="hot",
+    entities=(
+        NumberDesc(
+            key="oven_setpoint",
+            field="temperature",
+            device_class="temperature",
+            unit_fn=_ocf_temp_unit,
+            native_min=float(SETPOINT_MIN_C),
+            native_max=float(SETPOINT_MAX_C),
+            step=float(SETPOINT_STEP_C),
+            native_min_fn=lambda rep: float(_ocf_setpoint_bounds(rep)[0]),
+            native_max_fn=lambda rep: float(_ocf_setpoint_bounds(rep)[1]),
+            step_fn=lambda rep: float(_ocf_setpoint_bounds(rep)[2]),
+            icon="mdi:thermometer-chevron-up",
+            write_fn=_ocf_setpoint_write,
+        ),
+    ),
+)
+
+OVEN_PROBE_CURRENT_OCF = Capability(
+    href="/temperature/current/prob/0",
+    match_fn=_no_vendor_temps,
+    poll_tier="hot",
+    entities=(
+        SensorDesc(
+            key="food_probe_temp",
+            field="temperature",
+            device_class="temperature",
+            state_class="measurement",
+            unit_fn=_ocf_temp_unit,
+            exists_fn=_ocf_probe_connected,
+        ),
+    ),
+)
+
+OVEN_PROBE_DESIRED_OCF = Capability(
+    href="/temperature/desired/prob/0",
+    match_fn=_no_vendor_temps,
+    poll_tier="hot",
+    entities=(
+        SensorDesc(
+            key="food_probe_setpoint",
+            field="temperature",
+            device_class="temperature",
+            entity_category="diagnostic",
+            unit_fn=_ocf_temp_unit,
+            exists_fn=_ocf_probe_connected,
         ),
     ),
 )
@@ -366,15 +676,34 @@ OVEN_DOOR = Capability(
     ),
 )
 
+
+def _is_lower_cavity(rep, resources):
+    """The same signal coordinator._cavity_label names the device by."""
+    return cook.cavity(resources) == "Lower"
+
+
 OVEN_CONNECTED = Capability(
     href="/connected/vs/0",
     poll_tier="warm",
     entities=(
+        # A lower cavity's copy of this field is the divider below, so it is
+        # not also shown as a connectivity sensor there.
         BinarySensorDesc(
             key="cloud_connected",
             field="x.com.samsung.da.connected",
             device_class="connectivity",
             entity_category="diagnostic",
+            exists_fn=lambda rep, resources: not _is_lower_cavity(rep, resources),
+            value_fn=lambda v: v == "On",
+        ),
+        # On a lower cavity this flag is whether the divider is in, which
+        # SmartThings reports as ovenCavityStatus: On with the upper cavity
+        # offering only Upper* modes (issue #324), Off with whole-oven modes.
+        BinarySensorDesc(
+            key="divider",
+            field="x.com.samsung.da.connected",
+            icon="mdi:view-split-horizontal",
+            exists_fn=_is_lower_cavity,
             value_fn=lambda v: v == "On",
         ),
     ),
@@ -400,6 +729,8 @@ OVEN_MODE = Capability(
             options=_oven_mode_options,
             value_fn=lambda v: v[0] if v else None,
             write_fn=_oven_mode_write,
+            validate_fn=_oven_mode_validate,
+            cook_param=cook.PARAM_MODE,
         ),
         # No exists_fn on the NV7000BS-class board this was proven against
         # (UpperLamp_ is always in its options[]) -- but issue #300's
@@ -407,6 +738,12 @@ OVEN_MODE = Capability(
         # token at all, so this was a phantom, always-off, write-does-
         # nothing switch there. Same fastpreheat/NaturalSteam-class gap
         # issue #183 already fixed on the other switches below.
+        # Lamp, sound and energy_saving waive Remote Control, as
+        # the SmartThings app does (issues #183, #500; the lamp write is
+        # proven with it off, see the module docstring). None of them heats
+        # or starts anything, and the coordinator reads each one back and
+        # reports it if the oven dropped it. fast_preheat, natural_steam,
+        # cooktop_on_alert, mode, setpoint and cook time stay gated.
         SwitchDesc(
             key="lamp",
             field="x.com.samsung.da.options",
@@ -414,6 +751,7 @@ OVEN_MODE = Capability(
             exists_fn=_has_option("UpperLamp"),
             value_fn=lambda opts: _option_value(opts, "UpperLamp") == "On",
             write_fn=_option_switch_write("UpperLamp"),
+            needs_remote_control=False,
         ),
         SwitchDesc(
             key="sound",
@@ -422,6 +760,7 @@ OVEN_MODE = Capability(
             entity_category="config",
             value_fn=lambda opts: _option_value(opts, "Sound") == "On",
             write_fn=_option_switch_write("Sound"),
+            needs_remote_control=False,
         ),
         SwitchDesc(
             key="fast_preheat",
@@ -450,6 +789,7 @@ OVEN_MODE = Capability(
             exists_fn=_has_option("EnergySaving"),
             value_fn=lambda opts: _option_value(opts, "EnergySaving") == "On",
             write_fn=_option_switch_write("EnergySaving"),
+            needs_remote_control=False,
         ),
         # Cooktop-on alert (issue #183): also confirmed present
         # (BurnerOnAlert_Off) though the reporter noted it mainly matters for

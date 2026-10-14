@@ -1,5 +1,3 @@
-import cbor2
-
 from custom_components.localthings.registry.identity import (
     DeviceIdentity,
     is_usable_device_id,
@@ -13,11 +11,11 @@ class FakeSession:
     def __init__(self, table):
         self.table = table  # tuple(path) -> rep dict
 
-    def get(self, path, timeout=10.0):
+    def read(self, path, timeout=10.0):
         rep = self.table.get(tuple(path))
         if rep is None:
-            return 0x84, b""  # 4.04 not found
-        return 0x45, cbor2.dumps(rep)
+            return 0x84, None  # 4.04 not found
+        return 0x45, rep
 
 
 def test_read_identity_from_oic_p_and_d():
@@ -127,7 +125,7 @@ def test_read_identity_captures_oic_res_links():
 def test_read_identity_tolerates_malformed_oic_res():
     """A single Property map instead of an array (or anything else
     non-list-shaped) must not explode -- same defensive posture as
-    _device_types' handling of a malformed /oic/d rt."""
+    device_types_of's handling of a malformed /oic/d rt."""
     ident = read_identity(FakeSession({("oic", "res"): {"not": "a list"}}), serial=None)
     assert ident.raw["/oic/res"] == []
 

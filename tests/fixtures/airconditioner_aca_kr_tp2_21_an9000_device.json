@@ -1,0 +1,302 @@
+{
+  "device0": [
+    {
+      "rt": [
+        "x.com.samsung.devcol",
+        "oic.wk.col"
+      ],
+      "if": [
+        "oic.if.baseline",
+        "oic.if.ll",
+        "oic.if.b"
+      ]
+    },
+    {
+      "href": "/realtimenotiforclient/vs/0",
+      "rep": {
+        "x.com.samsung.da.timeforshortnoti": "0",
+        "x.com.samsung.da.longnotisubscription": "true",
+        "x.com.samsung.da.periodicnotisubscription": "true"
+      }
+    },
+    {
+      "href": "/airlevelcheck/vs/0",
+      "rep": {
+        "x.com.samsung.da.periodicSensingActivationState": "On",
+        "x.com.samsung.da.periodicSensingInterval": "600",
+        "x.com.samsung.da.startSensingOnce": "On",
+        "x.com.samsung.da.sensingState": "NonProcessing",
+        "x.com.samsung.da.lastSensingTime": "1790419751",
+        "x.com.samsung.da.lastSensingLevel": "Kr2",
+        "x.com.samsung.da.autoExeState": "Sensing",
+        "x.com.samsung.da.supportedAutoExeState": [
+          "Sensing",
+          "Airpurify",
+          "Alarm"
+        ],
+        "x.com.samsung.da.periodicSensingSkipStatus": "Off",
+        "x.com.samsung.da.periodicSensingSkipTime": "00000000"
+      }
+    },
+    {
+      "href": "/wind/strength/vs/0",
+      "rep": {
+        "x.com.samsung.da.modes": "0",
+        "x.com.samsung.da.supportedModes": [
+          "0",
+          "1",
+          "2",
+          "3"
+        ],
+        "x.com.samsung.da.modesName": [
+          "Auto",
+          "Low",
+          "Mid",
+          "High"
+        ]
+      }
+    },
+    {
+      "href": "/wind/direction/vs/0",
+      "rep": {
+        "x.com.samsung.da.modes": "Fix",
+        "x.com.samsung.da.supportedModes": [
+          "Up_And_Low",
+          "Fix"
+        ]
+      }
+    },
+    {
+      "href": "/filter/airdustfilter/vs/0",
+      "rep": {
+        "x.com.samsung.da.filterUsage": "20",
+        "x.com.samsung.da.filterUsageResolution": "1",
+        "x.com.samsung.da.filterStatus": "normal",
+        "x.com.samsung.da.filterCapacity": "550",
+        "x.com.samsung.da.filterCapacityUnit": "Hour",
+        "x.com.samsung.da.filterResetType": [
+          "replaceable",
+          "washable"
+        ]
+      }
+    },
+    {
+      "href": "/filter/hepafilter/vs/0",
+      "rep": {
+        "x.com.samsung.da.filterUsage": "1",
+        "x.com.samsung.da.filterUsageResolution": "1",
+        "x.com.samsung.da.filterStatus": "normal",
+        "x.com.samsung.da.filterCapacity": "8760",
+        "x.com.samsung.da.filterCapacityUnit": "Hour",
+        "x.com.samsung.da.filterResetType": [
+          "replaceable"
+        ]
+      }
+    },
+    {
+      "href": "/availablecontrolsets/vs/0",
+      "rep": {
+        "x.com.samsung.da.sets": "0001000000000000000002000000",
+        "x.com.samsung.da.id": "DIFFUSER",
+        "x.com.samsung.da.version": "1.0"
+      }
+    },
+    {
+      "href": "/da/softreset/vs/0",
+      "rep": {
+        "x.com.samsung.da.softwarereset": "false"
+      }
+    },
+    {
+      "href": "/keepnormalstate/vs/0",
+      "rep": {
+        "x.com.samsung.da.keepnormal": 0
+      }
+    },
+    {
+      "href": "/modeoption/windfree/vs/0",
+      "rep": {
+        "x.com.samsung.da.windfree": "Off",
+        "x.com.samsung.da.displaycondition": "normal"
+      }
+    },
+    {
+      "href": "/modeoption/windsleep/vs/0",
+      "rep": {
+        "x.com.samsung.da.windsleep": "Off",
+        "x.com.samsung.da.displaycondition": "normal"
+      }
+    },
+    {
+      "href": "/alarms/vs/0",
+      "rep": {
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Alarm",
+            "x.com.samsung.da.alarmType": "Device",
+            "x.com.samsung.da.code": "ErrorCode_OFF",
+            "x.com.samsung.da.triggeredTime": "2026-09-26T10:48:21",
+            "x.com.samsung.da.state": "Deleted"
+          },
+          {
+            "x.com.samsung.da.id": "1",
+            "x.com.samsung.da.description": "Alarm",
+            "x.com.samsung.da.alarmType": "Device",
+            "x.com.samsung.da.code": "FilterAlarm_OFF",
+            "x.com.samsung.da.triggeredTime": "2026-09-26T10:48:21",
+            "x.com.samsung.da.state": "Deleted"
+          }
+        ]
+      }
+    },
+    {
+      "href": "/mode/vs/0",
+      "rep": {
+        "x.com.samsung.da.supportedModes": [
+          "Purification",
+          "Ventilation",
+          "SmartVentilation"
+        ],
+        "x.com.samsung.da.modes": [
+          "SmartVentilation"
+        ],
+        "x.com.samsung.da.options": [
+          "Volume_100",
+          "Pollution_Off",
+          "KeyInputPermit_On",
+          "OptionCode_0",
+          "ExtendOptionCode_0"
+        ]
+      }
+    },
+    {
+      "href": "/power/vs/0",
+      "rep": {
+        "x.com.samsung.da.power": "Off"
+      }
+    },
+    {
+      "href": "/power/0",
+      "rep": {
+        "value": false
+      }
+    },
+    {
+      "href": "/sensors/vs/0",
+      "rep": {
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Sensor for Dust",
+            "x.com.samsung.da.type": "Dust",
+            "x.com.samsung.da.value": [
+              "80",
+              "2"
+            ]
+          },
+          {
+            "x.com.samsung.da.id": "1",
+            "x.com.samsung.da.description": "Sensor for FineDust",
+            "x.com.samsung.da.type": "FineDust",
+            "x.com.samsung.da.value": [
+              "74",
+              "3"
+            ]
+          },
+          {
+            "x.com.samsung.da.id": "2",
+            "x.com.samsung.da.description": "Sensor for Odor",
+            "x.com.samsung.da.type": "Odor",
+            "x.com.samsung.da.value": [
+              "1"
+            ]
+          },
+          {
+            "x.com.samsung.da.id": "3",
+            "x.com.samsung.da.description": "Sensor for CleanLevel",
+            "x.com.samsung.da.type": "CleanLevel",
+            "x.com.samsung.da.value": [
+              "3"
+            ]
+          },
+          {
+            "x.com.samsung.da.id": "4",
+            "x.com.samsung.da.description": "Sensor for SuperFineDust",
+            "x.com.samsung.da.type": "SuperFineDust",
+            "x.com.samsung.da.value": [
+              "35",
+              "2"
+            ]
+          },
+          {
+            "x.com.samsung.da.id": "5",
+            "x.com.samsung.da.description": "Sensor for CO2",
+            "x.com.samsung.da.type": "CO2",
+            "x.com.samsung.da.value": [
+              "778",
+              "1"
+            ]
+          }
+        ],
+        "x.com.samsung.da.total": "5"
+      }
+    },
+    {
+      "href": "/information/vs/0",
+      "rep": {
+        "x.com.samsung.da.modelNum": "ACA-KR-TP2-21-AN9000|10227541|6004000A001411CD0400000A008A0000",
+        "x.com.samsung.da.description": "ACA-KR-TP2-21-AN9000",
+        "x.com.samsung.da.serialNum": "**REDACTED**",
+        "x.com.samsung.da.otnDUID": "**REDACTED**",
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Version",
+            "x.com.samsung.da.type": "Software",
+            "x.com.samsung.da.number": "02343A250515",
+            "x.com.samsung.da.newVersionAvailable": "0"
+          },
+          {
+            "x.com.samsung.da.id": "1",
+            "x.com.samsung.da.description": "Version",
+            "x.com.samsung.da.type": "Firmware",
+            "x.com.samsung.da.number": "25010600,FFFFFFFF",
+            "x.com.samsung.da.newVersionAvailable": "0"
+          }
+        ]
+      }
+    },
+    {
+      "href": "/file/information/vs/0",
+      "rep": {
+        "x.com.samsung.timeoffset": "+09:00"
+      }
+    },
+    {
+      "href": "/configuration/vs/0",
+      "rep": {
+        "x.com.samsung.da.region": "0000000000",
+        "x.com.samsung.da.airconOptionList": [
+          "WELCOMECARE",
+          "AI_PURIFY"
+        ],
+        "x.com.samsung.da.countryCode": ""
+      }
+    },
+    {
+      "href": "/humidity/0",
+      "rep": {}
+    },
+    {
+      "href": "/humidity/vs/0",
+      "rep": {}
+    },
+    {
+      "href": "/devicespecificinfo/vs/0",
+      "rep": {
+        "x.com.samsung.da.deviceActive": true
+      }
+    }
+  ]
+}

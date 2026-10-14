@@ -11,8 +11,8 @@ from __future__ import annotations
 from typing import Any, cast
 
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
-from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
 from custom_components.localthings.const import (
     CONF_HOST,
@@ -24,7 +24,8 @@ from custom_components.localthings.const import (
 from custom_components.localthings.coordinator import LocalThingsCoordinator
 from custom_components.localthings.registry.entities import ClimateDesc
 from custom_components.localthings.registry.identity import DeviceIdentity
-from tests.conftest import FakeCoapSession, _load_device_full
+from custom_components.localthings.transport import Transport
+from tests.conftest import FakeCoapSession, _load_device_full, linked_parent
 
 ENTRY_DATA = {
     CONF_HOST: "10.0.0.177",
@@ -44,6 +45,17 @@ def _coordinator(hass: HomeAssistant) -> LocalThingsCoordinator:
     return LocalThingsCoordinator(hass, entry)
 
 
+def _register_master(hass: HomeAssistant, coordinator: LocalThingsCoordinator) -> None:
+    """The master's own device row, which a running install always has by the
+    time a subdevice entity is added -- its own entities create it. Needed
+    explicitly here because these tests drive the coordinator directly,
+    without the entity platform that would otherwise register it."""
+    dr.async_get(hass).async_get_or_create(
+        config_entry_id=coordinator._entry.entry_id,
+        identifiers={(DOMAIN, coordinator.device_key)},
+    )
+
+
 async def _discover_with(
     coordinator: LocalThingsCoordinator,
     resources: dict,
@@ -55,7 +67,7 @@ async def _discover_with(
     without the polling/reconnect machinery around it -- see coordinator.py's
     _enumerate_subdevices_blocking/_run_discovery. `_discover` below is the
     fixture-file-backed convenience wrapper most tests want."""
-    coordinator._session = cast(DtlsCoapSession, FakeCoapSession(seeds))
+    coordinator._session = cast(Transport, FakeCoapSession(seeds))
     # _connect_session (skipped here -- the session is pre-set) is what
     # normally populates _identity via read_identity; set it directly with
     # the fixture's real /oic/res so enumeration sees the same links a live
@@ -145,11 +157,12 @@ async def test_pattern_a_sub1_device_info_links_via_device_to_master(hass: HomeA
     await _discover(coordinator, "airconditioner_artik051_dongle_fac_18k")
 
     sub1 = next(su for su in coordinator.subdevices if su.key == "1")
+    master_serial = coordinator.device_key
+    _register_master(hass, coordinator)
     info = coordinator.device_info_for(sub1)
 
-    master_serial = coordinator.device_key
     assert info["identifiers"] == {(DOMAIN, f"{master_serial}_1")}
-    assert info["via_device"] == (DOMAIN, master_serial)
+    assert linked_parent(hass, info) == (DOMAIN, master_serial)
     # The subdevice's own /information/vs/1 (real, ARTIK051_DONGLE_FAC_RAC_18K)
     # is what names/models this device, not the master's.
     assert info["model"] == "ARTIK051_DONGLE_FAC_RAC_18K"
@@ -243,11 +256,12 @@ async def test_fac_bora_2in1_subdevice_device_info(hass: HomeAssistant):
     await _discover(coordinator, "airconditioner_fac_bora_2in1")
 
     subdevice = coordinator.subdevices[0]
+    master_serial = coordinator.device_key
+    _register_master(hass, coordinator)
     info = coordinator.device_info_for(subdevice)
 
-    master_serial = coordinator.device_key
     assert info["identifiers"] == {(DOMAIN, f"{master_serial}_{_SUB_UUID}")}
-    assert info["via_device"] == (DOMAIN, master_serial)
+    assert linked_parent(hass, info) == (DOMAIN, master_serial)
     # Confirmed live by the reporter (DESIGN-177.md section 1): the wall
     # subdevice's own identity, distinct from the master's TP2X_FAC_BORA_21K.
     assert info["model"] == "TP2X_FAC_BORA_RAC_21K"
@@ -426,14 +440,12 @@ class _FakeCollectionSession:
         self.table = table
         self.calls: list[tuple[str, ...]] = []
 
-    def get(self, path, timeout=10.0):
+    def read(self, path, timeout=10.0):
         self.calls.append(tuple(path))
         body = self.table.get(tuple(path))
         if body is None:
-            return 0x84, b""
-        import cbor2
-
-        return 0x45, cbor2.dumps(body)
+            return 0x84, None
+        return 0x45, body
 
     def pace(self):
         pass
@@ -457,7 +469,7 @@ def test_poll_subdevice_seed_collection_mode_unaffected_by_flat_fallback(
             ],
         }
     )
-    coordinator._session = cast(DtlsCoapSession, sess)
+    coordinator._session = cast(Transport, sess)
     subdevice = Subdevice(kind="prefixed", key=_SUB_UUID, seed_path=(_SUB_UUID, "device", "0"))
 
     result = coordinator._poll_subdevice_seed(subdevice)
@@ -483,7 +495,7 @@ def test_poll_subdevice_seed_flat_mode_polls_each_href_individually(
             # (_SUB_UUID, 'power', 'vs', '0') deliberately absent -> drops out.
         }
     )
-    coordinator._session = cast(DtlsCoapSession, sess)
+    coordinator._session = cast(Transport, sess)
     subdevice = Subdevice(
         kind="prefixed",
         key=_SUB_UUID,
@@ -516,7 +528,7 @@ def test_poll_subdevice_seed_flat_mode_skips_hrefs_covered_by_hot_warm_subpolls(
             (_SUB_UUID, "power", "vs", "0"): {"power": "On"},
         }
     )
-    coordinator._session = cast(DtlsCoapSession, sess)
+    coordinator._session = cast(Transport, sess)
     coordinator._warm_hrefs = [f"/{_SUB_UUID}/mode/vs/0"]
     subdevice = Subdevice(
         kind="prefixed",
@@ -552,7 +564,7 @@ async def test_multidevice_probe_never_reaches_discovery_or_the_cache(
     # FakeCoapSession's own docstring on the two shapes its `seeds` values can
     # take; its `seeds` param type only names the more common (list) shape.
     coordinator._session = cast(
-        DtlsCoapSession,
+        Transport,
         FakeCoapSession(
             cast(
                 "dict[str, list]",
@@ -583,3 +595,49 @@ async def test_multidevice_probe_never_reaches_discovery_or_the_cache(
     assert "/multidevice/vs/0" not in coordinator.last_resources
     # Still captured, just not as device state.
     assert coordinator._multidevice == {"x.com.samsung.da.numofsubdevice": "2"}
+
+
+async def test_dual_cavity_oven_names_each_cavity_from_the_device(hass: HomeAssistant) -> None:
+    """Both cavities of the issue #490 wall oven report the same modelNum,
+    so the model-derived label named them identically and the reporter got
+    two indistinguishable devices. Each cavity's own `/mode/vs/0` says
+    which it is."""
+    coordinator = _coordinator(hass)
+    _register_master(hass, coordinator)
+    await _discover(coordinator, "oven_nv75n_dual_cook")
+
+    assert [(s.kind, s.key) for s in coordinator.subdevices] == [("indexed", "1")]
+    info = coordinator.device_info_for(coordinator.subdevices[0])
+    assert (info["name"] or "").endswith("Lower oven")
+    # The model is still recorded, just no longer doing the naming.
+    assert info["model"] == "ARTIK051_GB_WO_003"
+
+
+async def test_a_subdevice_with_no_cavity_keeps_its_model_label(hass: HomeAssistant) -> None:
+    """The cavity rule is two prefixes wide on purpose: an ordinary
+    defaultMode is a cooking mode, and naming a device after one would be
+    worse than the model label it replaces."""
+    coordinator = _coordinator(hass)
+    _register_master(hass, coordinator)
+    await _discover(coordinator, "oven_nv75n_dual_cook")
+    sub = coordinator.subdevices[0]
+
+    mode = dict(coordinator.canonical_resources(sub)["/mode/vs/0"])
+    mode["x.com.samsung.da.defaultMode"] = "ConvectionBake"
+    coordinator._observe.apply(sub.to_actual("/mode/vs/0"), mode, source="poll")
+    coordinator._canonical_cache.clear()
+
+    assert (coordinator.device_info_for(sub)["name"] or "").endswith("Artik051 Gb Wo 003")
+
+
+async def test_the_cavity_label_also_covers_the_flex_range(hass: HomeAssistant) -> None:
+    """The rule is not scoped to issue #490's wall oven: the flex range
+    (issue #183) reports Upper/LowerConvectionBake and has cavities in the
+    same sense, so its second one renames off the model label too. Pinned
+    because that is a user-visible rename on an already-shipped device."""
+    coordinator = _coordinator(hass)
+    _register_master(hass, coordinator)
+    await _discover(coordinator, "range_tp1x_da_ks_range_0101x")
+
+    labels = [(coordinator.device_info_for(s)["name"] or "") for s in coordinator.subdevices]
+    assert any(label.endswith("Lower oven") for label in labels), labels

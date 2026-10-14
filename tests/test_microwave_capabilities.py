@@ -5,9 +5,15 @@ from custom_components.localthings.registry.by_type import (
     for_device_by_model,
     resolve,
 )
-from custom_components.localthings.registry.capabilities import microwave
+from custom_components.localthings.registry.capabilities import microwave, oven, range_hood
 from custom_components.localthings.registry.discovery import discover
-from custom_components.localthings.registry.entities import NumberDesc, SelectDesc, SwitchDesc
+from custom_components.localthings.registry.entities import (
+    BinarySensorDesc,
+    LightDesc,
+    NumberDesc,
+    SelectDesc,
+    SwitchDesc,
+)
 
 # ---------------------------------------------------------------------------
 # Device-type detection + full-dump coverage
@@ -135,6 +141,54 @@ def test_microwave_setpoint_rejects_missing_items():
     assert desc.write_fn(180, {}) is None
 
 
+def _nq7000b_resources(mode=None):
+    from tests.conftest import _load_device
+
+    resources = _load_device("microwave_nq7000b")
+    if mode is not None:
+        resources["/mode/vs/0"] = {**resources["/mode/vs/0"], "x.com.samsung.da.modes": [mode]}
+    return resources
+
+
+def test_microwave_setpoint_bounds_follow_active_mode_spec():
+    """Issue #496: the NQ7000B's modeSpec goes to 230°C in its oven modes,
+    past the 200°C the fixed bounds allowed."""
+    desc = _microwave_setpoint_desc()
+    assert desc.bounds_fn is not None
+    assert desc.bounds_fn({}, _nq7000b_resources("Convection")) == (40.0, 230.0, 5.0)
+    assert desc.bounds_fn({}, _nq7000b_resources("KeepWarm")) == (60.0, 100.0, 5.0)
+    assert desc.bounds_fn({}, _nq7000b_resources("MicroWaveGrill")) == (40.0, 200.0, 5.0)
+
+
+def test_microwave_setpoint_bounds_widen_across_modes_without_active_range():
+    desc = _microwave_setpoint_desc()
+    assert desc.bounds_fn is not None
+    # Idle ('NoOperation') and plain MicroWave report no temperature range.
+    assert desc.bounds_fn({}, _nq7000b_resources()) == (40.0, 230.0, 5.0)
+    assert desc.bounds_fn({}, _nq7000b_resources("MicroWave")) == (40.0, 230.0, 5.0)
+
+
+def test_microwave_setpoint_bounds_fall_back_without_mode_spec():
+    desc = _microwave_setpoint_desc()
+    assert desc.bounds_fn is not None
+    assert desc.bounds_fn({}, {}) == (40.0, 200.0, 5.0)
+    garbled = {"/mode/vs/0": {"x.com.samsung.da.modeSpec": "not json"}}
+    assert desc.bounds_fn({}, garbled) == (40.0, 200.0, 5.0)
+
+
+def test_microwave_setpoint_write_validates_against_mode_spec():
+    desc = _microwave_setpoint_desc()
+    rep = {"x.com.samsung.da.items": [{"x.com.samsung.da.desired": "0"}]}
+    assert desc.write_fn is not None
+    convection = _nq7000b_resources("Convection")
+    result = desc.write_fn(230, rep, "/temperatures/vs/0", convection)
+    assert result is not None
+    assert result[1]["x.com.samsung.da.items"][0]["x.com.samsung.da.desired"] == "230"
+    assert desc.write_fn(235, rep, "/temperatures/vs/0", convection) is None
+    keep_warm = _nq7000b_resources("KeepWarm")
+    assert desc.write_fn(150, rep, "/temperatures/vs/0", keep_warm) is None
+
+
 def test_microwave_setpoint_exists_only_for_celsius():
     """No Fahrenheit dump exists for this family (unlike oven.py's, verified
     against issue #44) -- the writable setpoint stays hidden rather than
@@ -199,6 +253,15 @@ def test_microwave_mode_options_reads_live_supported_modes():
         }
     }
     assert desc.options(resources) == ["NoOperation", "MicroWave", "Autocook", "KeepWarm"]
+
+
+def test_microwave_mode_options_drop_homecare_wizard():
+    """Same as the oven (#600): the LCD_R18 microwave lists
+    HOMECARE_WIZARD_V2 among its supportedModes."""
+    desc = _microwave_cooking_mode_desc()
+    rep = {"x.com.samsung.da.supportedModes": ["Convection", "HOMECARE_WIZARD_V2"]}
+    assert desc.options({"/mode/vs/0": rep}) == ["Convection"]
+    assert desc.write_fn("HOMECARE_WIZARD_V2", rep) is None
 
 
 def test_microwave_mode_write_round_trips():
@@ -318,6 +381,105 @@ def test_lamp_reads_any_non_off_level_as_true():
     assert desc.value_fn(["Lamp_High"]) is True
 
 
+def test_upper_lamp_gated_present_and_reads_state():
+    """Oven-class combis (NQ7000B, issue #496) spell the token 'UpperLamp'."""
+    desc = next(
+        e
+        for e in microwave.MICROWAVE_MODE.entities
+        if e.key == "lamp" and isinstance(e, SwitchDesc)
+    )
+    rep = {"x.com.samsung.da.options": ["UpperLamp_Off", "Sound_Off"]}
+    assert desc.exists_fn is not None
+    assert desc.exists_fn(rep, {}) is True
+    assert desc.value_fn(["UpperLamp_Off"]) is False
+    assert desc.value_fn(["UpperLamp_On"]) is True
+
+
+def test_upper_lamp_write_uses_oven_on_off_values():
+    desc = next(
+        e
+        for e in microwave.MICROWAVE_MODE.entities
+        if e.key == "lamp" and isinstance(e, SwitchDesc)
+    )
+    rep = {"x.com.samsung.da.options": ["UpperTimerState_Ready", "UpperLamp_Off"]}
+    assert desc.write_fn is not None
+    assert desc.write_fn("On", rep) == (
+        ["mode", "vs", "0"],
+        {"x.com.samsung.da.options": ["UpperLamp_On"]},
+    )
+    assert desc.write_fn("Off", rep) == (
+        ["mode", "vs", "0"],
+        {"x.com.samsung.da.options": ["UpperLamp_Off"]},
+    )
+
+
+def _lamp_level():
+    return next(
+        e
+        for e in microwave.MICROWAVE_MODE.entities
+        if e.key == "lamp_level" and isinstance(e, SelectDesc)
+    )
+
+
+def test_lamp_level_offers_three_levels_and_reads_the_token():
+    """Issue #181: the ME7500D's light has Low as well as High."""
+    desc = _lamp_level()
+    assert tuple(desc.options) == ("Off", "Low", "High")
+    assert desc.value_fn(["Sound_On", "Lamp_Low"]) == "Low"
+    assert desc.value_fn(["Lamp_High"]) == "High"
+
+
+def test_lamp_level_writes_each_level_as_one_token():
+    desc = _lamp_level()
+    rep = {"x.com.samsung.da.options": ["Lamp_Off"]}
+    assert desc.write_fn is not None
+    for level in ("Off", "Low", "High"):
+        assert desc.write_fn(level, rep) == (
+            ["mode", "vs", "0"],
+            {"x.com.samsung.da.options": [f"Lamp_{level}"]},
+        )
+    assert desc.write_fn("Medium", rep) is None
+    assert desc.write_fn("Low", {}) is None
+
+
+def test_lamp_level_gated_to_the_bare_lamp_token():
+    """UpperLamp boards (NQ7000B, issue #496) only have On/Off, and the
+    combi dump (issue #121) has no lamp at all."""
+    desc = _lamp_level()
+    assert desc.exists_fn is not None
+    assert desc.exists_fn({"x.com.samsung.da.options": ["Lamp_Off"]}, {}) is True
+    assert desc.exists_fn({"x.com.samsung.da.options": ["UpperLamp_Off"]}, {}) is False
+    assert desc.exists_fn({"x.com.samsung.da.options": ["Sound_Off"]}, {}) is False
+
+
+def test_nq7000b_fixture_resolves_as_microwave_with_lamp_and_clock_sync():
+    """Issue #496: NQ7000B declares oic.d.oven but has the microwave
+    surface; it binds fully, with the UpperLamp switch and clock sync."""
+    from tests.conftest import _load_device
+
+    resources = _load_device("microwave_nq7000b")
+    reg = resolve(resources, device_types=("oic.wk.d", "oic.d.oven"))
+
+    assert reg is not None
+    assert reg.name == "microwave"
+    unbound = []
+    bound = discover(resources, reg.capabilities, reg.pattern_capabilities, log=unbound.append)
+    assert unbound == []
+    keys = {entity.desc.key for entity in bound}
+    assert {"cooking_mode", "power_level", "lamp", "sync_clock"} <= keys
+    assert "oven_mode" not in keys
+
+
+def test_microwave_without_configuration_has_no_clock_sync():
+    from tests.conftest import _load_device
+
+    resources = _load_device("microwave_mw7300b")
+    reg = resolve(resources)
+    assert reg is not None
+    bound = discover(resources, reg.capabilities, reg.pattern_capabilities)
+    assert all(entity.desc.key != "sync_clock" for entity in bound)
+
+
 # ---------------------------------------------------------------------------
 # MICROWAVE_MODE — filter_remind/remind_beep options-array writes (issue #181)
 # ---------------------------------------------------------------------------
@@ -427,3 +589,325 @@ def test_remind_beep_write_requires_existing_options():
     )
     assert desc.write_fn is not None
     assert desc.write_fn("On", {}) is None
+
+
+# ---------------------------------------------------------------------------
+# DAWIT 3.0 generation (issue #433) -- /oven/status/vs/0, /oven/spec/vs/0,
+# /oven/settings/status/vs/0, and the analogous built-in vent hood.
+# ---------------------------------------------------------------------------
+
+
+def _me80h2160raa():
+    from tests.conftest import _load_device
+
+    resources = _load_device("microwave_me80h2160raa")
+    reg = resolve(resources, device_types=("oic.wk.d", "oic.d.microwave"))
+    return reg, resources
+
+
+def test_me80h2160raa_fixture_resolves_and_has_no_unbound_hrefs():
+    reg, resources = _me80h2160raa()
+    assert reg is not None
+    assert reg.name == "microwave"
+
+    unbound = []
+    discover(resources, reg.capabilities, reg.pattern_capabilities, log=unbound.append)
+    assert unbound == []
+
+
+def test_dawit_generation_is_entirely_read_only():
+    """Issue #433's reporter got CoAP 4.05 (Method Not Allowed) writing
+    every one of this generation's five resources, and the board declares
+    them oic.if.s where every writable href in the corpus declares
+    oic.if.a. So none of these descriptors may carry a write_fn -- a
+    control that always errors is worse than a sensor (issues #181/#183,
+    common.KIDS_LOCK_VS_FALLBACK)."""
+    reg, resources = _me80h2160raa()
+    bound = discover(resources, reg.capabilities, reg.pattern_capabilities)
+    writable = sorted({b.desc.key for b in bound if getattr(b.desc, "write_fn", None) is not None})
+    assert writable == []
+
+
+def _status_entity(key, cls=None):
+    return next(
+        e
+        for e in microwave.MICROWAVE_STATUS.entities
+        if e.key == key and (cls is None or isinstance(e, cls))
+    )
+
+
+def _hood_entity(key, cls=None):
+    return next(
+        e
+        for e in range_hood.HOOD_STATUS.entities
+        if e.key == key and (cls is None or isinstance(e, cls))
+    )
+
+
+def test_status_machine_state_maps_operation_to_ocf():
+    desc = _status_entity("machine_state")
+    assert desc.value_fn("ready") == "idle"
+    assert desc.value_fn("run") == "active"
+    assert desc.value_fn("pause") == "pause"
+
+
+def test_status_cycle_active_reflects_operation():
+    desc = _status_entity("cycle_active")
+    assert desc.value_fn("run") is True
+    assert desc.value_fn("ready") is False
+
+
+def test_status_door_open_reads_nested_state():
+    desc = _status_entity("door_open")
+    assert desc.value_fn({"state": "open"}) is True
+    assert desc.value_fn({"state": "closed"}) is False
+    assert desc.value_fn(None) is False
+
+
+def test_status_child_lock_polarity_matches_the_shared_lock_sensor():
+    """device_class='lock' is inverted in HA -- On means unlocked, the
+    same reading common.KIDS_LOCK_GENERIC ships."""
+    desc = _status_entity("child_lock", BinarySensorDesc)
+    assert desc.device_class == "lock"
+    assert desc.value_fn("off") is True
+    assert desc.value_fn("on") is False
+
+
+def test_status_cooking_mode_uses_the_shared_catalog_states():
+    """The device's PascalCase mode names map onto the state keys
+    select.cooking_mode already ships, so this generation reads the same
+    as the older one."""
+    desc = _status_entity("cooking_mode")
+    assert desc.value_fn({"name": "MicroWave"}) == "micro_wave"
+    assert desc.value_fn({"name": "NoOperation"}) == "no_operation"
+    assert desc.value_fn(None) is None
+
+
+def test_status_cooking_mode_options_read_the_live_list():
+    """availableModeList, mapped the same way -- no hardcoded vocabulary.
+    It omits NoOperation (mode.name's resting value); sensor.py's
+    `options` property admits the live value, so nothing unions it here."""
+    desc = _status_entity("cooking_mode")
+    resources = {
+        "/oven/status/vs/0": {
+            "availableModeList": ["MicroWave", "Autocook", "KeepWarm"],
+            "mode": {"name": "NoOperation"},
+        }
+    }
+    assert desc.options(resources) == ["micro_wave", "autocook", "keep_warm"]
+    assert desc.options({}) == []
+
+
+def test_status_power_level_takes_its_unit_from_the_device():
+    desc = _status_entity("power_level")
+    assert desc.value_fn({"unit": "percentage", "setting": 60}) == 60
+    assert desc.value_fn({"unit": "percentage"}) is None
+    assert desc.unit_fn({"microwavePowerLevel": {"unit": "percentage"}}) == "%"
+    assert desc.unit_fn({"microwavePowerLevel": {"unit": "grams"}}) is None
+    assert desc.unit_fn({}) is None
+
+
+def test_status_cook_time_reads_seconds():
+    """/oven/spec/vs/0 caps `time` at 6039 = 99*60 + 99, the 99:99 these
+    panels count down from -- which is what fixes the unit as seconds."""
+    setting = _status_entity("cook_time")
+    remaining = _status_entity("cook_time_remaining")
+    assert (setting.unit, setting.device_class) == ("s", "duration")
+    assert setting.value_fn({"setting": 90, "remaining": 45}) == 90
+    assert remaining.value_fn({"setting": 90, "remaining": 45}) == 45
+    assert remaining.value_fn({}) is None
+
+
+def test_status_cook_finish_time_parses_iso_and_blanks_to_none():
+    desc = _status_entity("cook_finish_time")
+    assert desc.value_fn({"completion": ""}) is None
+    assert desc.value_fn({}) is None
+    parsed = desc.value_fn({"completion": "2026-09-01T23:14:23"})
+    assert parsed is not None and parsed.year == 2026
+
+
+def test_settings_are_binary_sensors_not_switches():
+    keys = {e.key for e in microwave.MICROWAVE_SETTINGS.entities}
+    assert keys == {"beep", "remind_beep", "display_time_auto_sync"}
+    for desc in microwave.MICROWAVE_SETTINGS.entities:
+        assert isinstance(desc, BinarySensorDesc), desc.key
+        assert desc.value_fn("on") is True
+        assert desc.value_fn("off") is False
+
+
+def test_settings_has_no_orphan_unit_format_sensors():
+    """weightUnit/timeFormat are deliberately unbound -- see the
+    capability's comment."""
+    keys = {e.key for e in microwave.MICROWAVE_SETTINGS.entities}
+    assert "weight_unit" not in keys
+    assert "time_format" not in keys
+
+
+def test_hood_options_read_the_spec_resource():
+    """The status rep carries no vocabulary of its own; both lists live on
+    the sibling /hood/spec/vs/0."""
+    resources = {
+        "/hood/spec/vs/0": {
+            "fanSpeedList": ["off", "low", "medium", "high", "boost"],
+            "lampStateList": ["off", "medium", "on"],
+        }
+    }
+    assert _hood_entity("hood_fan_speed").options(resources) == [
+        "off",
+        "low",
+        "medium",
+        "high",
+        "boost",
+    ]
+    assert _hood_entity("hood_lamp").options(resources) == ["off", "medium", "on"]
+
+
+def test_hood_fan_speed_options_keep_currently_unavailable_speeds():
+    """unavailableFanSpeedList says what can't be *selected* right now.
+    Nothing here is selectable, and an enum sensor still has to render
+    whatever the device reports, so the list isn't subtracted."""
+    resources = {
+        "/hood/spec/vs/0": {"fanSpeedList": ["off", "low", "boost"]},
+        "/hood/status/vs/0": {"unavailableFanSpeedList": ["boost"], "fanSpeed": "boost"},
+    }
+    assert _hood_entity("hood_fan_speed").options(resources) == ["off", "low", "boost"]
+
+
+def test_hood_entities_gated_off_without_spec():
+    """An enum sensor with no options is a broken entity in HA, so both
+    stand down on a board reporting status without its spec sibling."""
+    status = {"fanSpeed": "off", "lamp": "off"}
+    for key in ("hood_fan_speed", "hood_lamp"):
+        desc = _hood_entity(key)
+        assert desc.exists_fn(status, {"/hood/status/vs/0": status}) is False
+        assert (
+            desc.exists_fn(
+                status,
+                {
+                    "/hood/status/vs/0": status,
+                    "/hood/spec/vs/0": {
+                        "fanSpeedList": ["off", "low"],
+                        "lampStateList": ["off", "on"],
+                    },
+                },
+            )
+            is True
+        )
+
+
+def test_hood_grease_filter_alarm_detects_any_active_alarm():
+    desc = _hood_entity("grease_filter_alarm")
+    assert desc.value_fn([{"filterType": "greaseFilter", "alarm": "off"}]) is False
+    assert desc.value_fn([{"filterType": "greaseFilter", "alarm": "on"}]) is True
+    # A null/blank alarm is no alarm -- str(None).lower() is 'none', which
+    # a bare != "off" check would read as active.
+    assert desc.value_fn([{"filterType": "greaseFilter", "alarm": None}]) is False
+    assert desc.value_fn([{"filterType": "greaseFilter"}]) is False
+    assert desc.value_fn([]) is False
+    assert desc.value_fn(None) is False
+
+
+def test_hood_front_vent_reads_raw_on_off():
+    desc = _hood_entity("front_vent_open")
+    assert desc.value_fn("on") is True
+    assert desc.value_fn("off") is False
+
+
+# ---------------------------------------------------------------------------
+# MICROWAVE_MODE — lamp lights (#568)
+# ---------------------------------------------------------------------------
+
+
+def _lamp(*, brightness: bool):
+    return next(
+        e
+        for e in microwave.MICROWAVE_MODE.entities
+        if isinstance(e, LightDesc) and e.supports_brightness is brightness
+    )
+
+
+def test_lamp_descriptors_are_mutually_exclusive():
+    bare = _lamp(brightness=True)
+    upper = _lamp(brightness=False)
+    assert bare.exists_fn is not None
+    assert upper.exists_fn is not None
+
+    no_lamp = {"x.com.samsung.da.options": ["DeviceType_MW7300B-/EU1", "Sound_Off"]}
+    assert bare.exists_fn(no_lamp, {}) is False
+    assert upper.exists_fn(no_lamp, {}) is False
+
+    bare_lamp = {"x.com.samsung.da.options": ["Lamp_Off", "Sound_On"]}
+    assert bare.exists_fn(bare_lamp, {}) is True
+    assert upper.exists_fn(bare_lamp, {}) is False
+
+    upper_lamp = {"x.com.samsung.da.options": ["UpperLamp_Off", "Sound_Off"]}
+    assert bare.exists_fn(upper_lamp, {}) is False
+    assert upper.exists_fn(upper_lamp, {}) is True
+
+    both_tokens = {"x.com.samsung.da.options": ["Lamp_Low", "UpperLamp_On"]}
+    assert bare.exists_fn(both_tokens, {}) is True
+    assert upper.exists_fn(both_tokens, {}) is False
+
+
+def test_lamp_reads_three_brightness_levels():
+    desc = _lamp(brightness=True)
+    assert desc.value_fn(["Lamp_Off"]) == 0
+    assert desc.value_fn(["Lamp_Low"]) == 128
+    assert desc.value_fn(["Lamp_High"]) == 255
+    assert desc.value_fn(["Lamp_On"]) == 255
+    assert desc.value_fn(["Sound_On"]) is None
+
+
+def test_lamp_brightness_writes_supported_ranges():
+    desc = _lamp(brightness=True)
+    rep = {"x.com.samsung.da.options": ["Lamp_Off"]}
+    assert desc.write_fn is not None
+    expected = {0: "Off", 1: "Low", 128: "Low", 129: "High", 255: "High"}
+    for brightness, level in expected.items():
+        assert desc.write_fn(brightness, rep) == (
+            ["mode", "vs", "0"],
+            {"x.com.samsung.da.options": [f"Lamp_{level}"]},
+        )
+    assert desc.write_fn("invalid", rep) is None
+    assert desc.write_fn(128, {}) is None
+
+
+def test_upper_lamp_reads_and_writes_on_off_values():
+    desc = _lamp(brightness=False)
+    assert desc.value_fn(["UpperLamp_Off"]) is False
+    assert desc.value_fn(["UpperLamp_On"]) is True
+    rep = {"x.com.samsung.da.options": ["UpperTimerState_Ready", "UpperLamp_Off"]}
+    assert desc.write_fn is not None
+    assert desc.write_fn(True, rep) == (
+        ["mode", "vs", "0"],
+        {"x.com.samsung.da.options": ["UpperLamp_On"]},
+    )
+    assert desc.write_fn(False, rep) == (
+        ["mode", "vs", "0"],
+        {"x.com.samsung.da.options": ["UpperLamp_Off"]},
+    )
+    assert desc.write_fn("On", rep) is None
+    assert desc.write_fn(True, {}) is None
+
+
+def test_lamp_switch_and_level_select_stay_but_are_disabled_by_default():
+    """#568: the light replaces them for new installs, while existing
+    entities keep their unique_ids, so the light gets its own key."""
+    lamp_entities = [e for e in microwave.MICROWAVE_MODE.entities if "lamp" in e.key]
+    by_type = {(type(e).__name__, e.key) for e in lamp_entities}
+    assert ("SwitchDesc", "lamp") in by_type
+    assert ("SelectDesc", "lamp_level") in by_type
+    assert {e.key for e in lamp_entities if isinstance(e, LightDesc)} == {"lamp_light"}
+    for e in lamp_entities:
+        assert e.enabled_default is isinstance(e, LightDesc), e.key
+
+
+def test_progress_reads_unknown_for_the_fixed_201_a_running_cook_reports():
+    """#181: TP1X microwaves report progressPercentage 201 from start to end
+    of a cook, which is no percentage."""
+    desc = next(e for e in oven.OVEN_OPERATIONAL_STATE.entities if e.key == "progress_percentage")
+    assert desc.rep_fn is not None
+    running = {"x.com.samsung.da.state": "Run"}
+    assert desc.rep_fn({**running, "x.com.samsung.da.progressPercentage": "201"}) is None
+    assert desc.rep_fn({**running, "x.com.samsung.da.progressPercentage": "40"}) == 40
+    assert desc.rep_fn({"x.com.samsung.da.state": "Ready"}) == 0

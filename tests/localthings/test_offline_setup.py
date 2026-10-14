@@ -12,6 +12,7 @@ rather than repeating both every cycle (issue #269).
 
 from __future__ import annotations
 
+import json
 import logging
 import time
 from contextlib import contextmanager
@@ -21,6 +22,7 @@ from unittest.mock import patch
 import pytest
 from homeassistant.config_entries import ConfigEntryState
 from homeassistant.core import HomeAssistant
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers import issue_registry as ir
 from homeassistant.helpers.update_coordinator import UpdateFailed
 from homeassistant.util import dt as dt_util
@@ -29,8 +31,10 @@ from smartthings_local.errors import SessionTimeoutError
 
 from custom_components.localthings.const import DOMAIN, SUMMARY_INTERVAL_S
 from custom_components.localthings.coordinator import LocalThingsCoordinator
+from custom_components.localthings.registry.batch import parse_device0_batch
 from custom_components.localthings.registry.identity import DeviceIdentity
 
+from .conftest import FIXTURES
 from .conftest import _load_fridge_resources as _load_fridge
 
 _COORD = "custom_components.localthings.coordinator.LocalThingsCoordinator"
@@ -121,6 +125,36 @@ async def test_snapshot_written_after_first_discovery(
     assert stored["resources"]
     assert "/information/vs/0" in stored["resources"]
     assert "subdevice_candidates" in stored
+
+
+async def test_snapshot_survives_a_binary_rep(
+    hass: HomeAssistant, mock_entry, hass_storage
+) -> None:
+    """A rep carrying bytes used to fail the whole snapshot write -- the
+    JSON store can't encode one -- and the only symptom was this entry
+    silently losing its offline load. registry/encode.py stores a marker
+    and rebuilds the bytes on replay."""
+    resources = _load_fridge()
+    resources["/file/transfer/vs/0"] = {
+        "x.com.samsung.name": "/mnt/usage.db",
+        "x.com.samsung.blob": b"\x00\x01\x02usage",
+    }
+
+    online_ids = await _setup_online_then_unload(hass, mock_entry, resources)
+    assert online_ids
+
+    stored = hass_storage[_store_key(mock_entry)]["data"]
+    assert stored["resources"]["/file/transfer/vs/0"]["x.com.samsung.blob"]["len"] == 8
+
+    with _unreachable():
+        await hass.config_entries.async_setup(mock_entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert mock_entry.state is ConfigEntryState.LOADED
+    assert {s.entity_id for s in hass.states.async_all()} == online_ids
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    replayed = coordinator.discovery_resources["/file/transfer/vs/0"]
+    assert replayed["x.com.samsung.blob"] == b"\x00\x01\x02usage"
 
 
 async def test_snapshot_not_written_when_device_never_answers(
@@ -377,6 +411,58 @@ async def test_reconcile_is_quiet_when_live_discovery_agrees(
     reload.assert_not_called()
 
 
+def _load_washer() -> dict:
+    data = json.loads((FIXTURES / "washer_device.json").read_text())
+    return parse_device0_batch(data["device0"])
+
+
+def _cycle_entry(hass: HomeAssistant, entry) -> er.RegistryEntry:
+    ent_reg = er.async_get(hass)
+    (cycle,) = (
+        e
+        for e in er.async_entries_for_config_entry(ent_reg, entry.entry_id)
+        if e.domain == "select" and e.unique_id.endswith("_cycle")
+    )
+    return cycle
+
+
+async def test_offline_load_registers_the_course_table_translation_key(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """HA writes an entity's translation_key to the registry only when it is
+    added, and the frontend translates state from that copy. An offline load
+    that resolved the cycle's key against the still-empty live cache stored
+    the generic 'cycle', so courses showed as raw codes like '1d' once the
+    washer came back (issue #531)."""
+    resources = _load_washer()
+    await _setup_online_then_unload(hass, mock_entry, resources)
+    assert _cycle_entry(hass, mock_entry).translation_key == "washer_cycle_table_02"
+
+    with _unreachable():
+        await hass.config_entries.async_setup(mock_entry.entry_id)
+        await hass.async_block_till_done()
+
+    assert _cycle_entry(hass, mock_entry).translation_key == "washer_cycle_table_02"
+
+
+async def test_stale_registry_translation_key_is_corrected_live(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """A registry key that disagrees with what live data resolves to --
+    whatever wrote it -- is repaired on the next update rather than lasting
+    until the entry reloads (issue #531)."""
+    resources = _load_washer()
+    with _reachable(resources):
+        await hass.config_entries.async_setup(mock_entry.entry_id)
+        await hass.async_block_till_done()
+        er.async_get(hass).async_update_entity(
+            _cycle_entry(hass, mock_entry).entity_id, translation_key="cycle"
+        )
+        await _tick(hass)
+
+    assert _cycle_entry(hass, mock_entry).translation_key == "washer_cycle_table_02"
+
+
 def test_coverage_gap_repair_is_live_only(hass: HomeAssistant, mock_entry) -> None:
     """A coverage gap is a claim about what the device reports, so replaying
     a snapshot must not raise the Repair -- it would restate last run's
@@ -496,6 +582,43 @@ async def test_dark_appliance_reports_its_outage_once(
     recovered = [r for r in caplog.records if "device answered again" in r.getMessage()]
     assert len(recovered) == 1
     assert recovered[0].levelno == logging.INFO
+
+
+async def test_dark_appliance_without_a_handshake_polls_once_per_cycle(
+    hass: HomeAssistant, mock_entry, caplog
+) -> None:
+    """The 8888 transport opens no session, so a switched-off washer fails in
+    the poll itself rather than the handshake. Once the outage is reported,
+    each cycle must cost one request and no warning -- the reconnect retry
+    used to add a second request and a WARNING to every cycle."""
+    resources = _load_fridge()
+    await _setup_online_then_unload(hass, mock_entry, resources)
+
+    polls: list[float] = []
+
+    def _poll(self) -> dict:
+        polls.append(time.monotonic())
+        raise RuntimeError("poll GET failed: [Errno 113] Host is unreachable")
+
+    caplog.clear()
+    caplog.set_level(logging.INFO)
+    with (
+        patch(f"{_COORD}._connect_session"),
+        patch(f"{_COORD}._poll_once", _poll),
+        patch(f"{_COORD}._close_session"),
+        patch.object(LocalThingsCoordinator, "_RECONNECT_PAUSE_S", 0),
+    ):
+        await hass.config_entries.async_setup(mock_entry.entry_id)
+        await hass.async_block_till_done()
+        after_setup = len(polls)
+
+        for expected in (1, 2, 3, 4):
+            await _tick(hass)
+            assert len(polls) == after_setup + expected
+
+    ours = [r for r in caplog.records if r.name.startswith(f"{_COORD_LOGGER}.")]
+    assert [r for r in ours if r.levelno == logging.WARNING] == []
+    assert len([r for r in ours if r.levelno >= logging.ERROR]) == 1
 
 
 async def test_broken_session_still_reconnects_within_the_cycle(

@@ -1,10 +1,12 @@
-"""Home Assistant services for direct OCF resource read/write access
-(issue #300): a raw-transport escape hatch for reverse-engineering a
-device's write contract -- an ordered multi-write sequence with settle
-delays and a delayed re-read, which the single-write options-flow debug
-panel can't express. Both sit on the same coordinator primitives the panel
-now calls too (config_flow.py), so there is exactly one code path that
-performs a raw write.
+"""Home Assistant services: `start_cooking` (issue #473), and direct OCF
+resource read/write access (issue #300) -- a raw-transport escape hatch for
+reverse-engineering a device's write contract, as an ordered multi-write
+sequence with settle delays and a delayed re-read, which the single-write
+options-flow debug panel can't express. Both raw services sit on the same
+coordinator primitives the panel now calls too (config_flow.py), so there
+is exactly one code path that performs a raw write. `observe_resource`
+(issue #607) is the same kind of escape hatch for OBSERVE: it listens to one
+resource for a while, to find fields a board only pushes.
 
 Kept thin on purpose: session/lock ownership lives on the coordinator
 (coordinator.py). This module only resolves the service call's device
@@ -17,22 +19,36 @@ from __future__ import annotations
 from typing import Any, cast
 
 import voluptuous as vol
+from homeassistant.const import UnitOfTemperature
 from homeassistant.core import HomeAssistant, ServiceCall, ServiceResponse, SupportsResponse
 from homeassistant.exceptions import ServiceValidationError
 from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
+from homeassistant.util.unit_conversion import TemperatureConverter
 
-from .const import DOMAIN, SERVICE_READ_RESOURCE, SERVICE_WRITE_RESOURCE
-from .coordinator import LocalThingsCoordinator, normalize_href
+from .const import (
+    DOMAIN,
+    SERVICE_OBSERVE_RESOURCE,
+    SERVICE_READ_RESOURCE,
+    SERVICE_START_COOKING,
+    SERVICE_WRITE_RESOURCE,
+)
+from .coordinator import LocalThingsCoordinator, normalize_href, split_href_query
+from .registry.capabilities import cook
+from .registry.encode import json_safe
 from .registry.subdevices import MAIN, Subdevice
 
 ATTR_HREF = "href"
 ATTR_PAYLOAD = "payload"
 ATTR_SETTLE = "settle"
+ATTR_READBACK = "readback"
 ATTR_WRITES = "writes"
 ATTR_VERIFY_AFTER = "verify_after"
 ATTR_HOLD_SESSION_LOCK = "hold_session_lock"
 ATTR_DEVICE_ID = "device_id"
+ATTR_MODE = "mode"
+ATTR_TEMPERATURE = "temperature"
+ATTR_DURATION = "duration"
 
 _WRITE_ITEM_SCHEMA = vol.Schema(
     {
@@ -44,6 +60,7 @@ _WRITE_ITEM_SCHEMA = vol.Schema(
         # a bad payload tripped.
         vol.Required(ATTR_PAYLOAD): object,
         vol.Optional(ATTR_SETTLE): vol.Coerce(float),
+        vol.Optional(ATTR_READBACK): cv.boolean,
     }
 )
 
@@ -67,6 +84,24 @@ _READ_RESOURCE_SCHEMA = vol.Schema(
     {
         **cv.TARGET_SERVICE_FIELDS,
         vol.Optional(ATTR_HREF): str,
+    }
+)
+
+# The duration's range is checked on the coordinator, like write_resource's.
+_OBSERVE_RESOURCE_SCHEMA = vol.Schema(
+    {
+        **cv.TARGET_SERVICE_FIELDS,
+        vol.Required(ATTR_HREF): str,
+        vol.Optional(ATTR_DURATION, default=30.0): vol.Coerce(float),
+    }
+)
+
+_START_COOKING_SCHEMA = vol.Schema(
+    {
+        **cv.TARGET_SERVICE_FIELDS,
+        vol.Optional(ATTR_MODE): cv.string,
+        vol.Optional(ATTR_TEMPERATURE): vol.Coerce(float),
+        vol.Optional(ATTR_DURATION): cv.positive_time_period,
     }
 )
 
@@ -127,6 +162,7 @@ async def _async_write_resource(hass: HomeAssistant, call: ServiceCall) -> Servi
             "href": subdevice.to_actual(canonical),
             "payload": w.get(ATTR_PAYLOAD),
             "settle": w.get(ATTR_SETTLE, 0.0),
+            "readback": w.get(ATTR_READBACK, True),
         }
         for canonical, w in zip(canonicals, writes_in, strict=True)
     ]
@@ -143,7 +179,9 @@ async def _async_write_resource(hass: HomeAssistant, call: ServiceCall) -> Servi
             "code": result["code"],
             "raw_code": result["raw_code"],
             "accepted": result["accepted"],
+            "response_body": result["response_body"],
             "before": result["before"],
+            "readback": result["readback"],
             "after": result["after"],
             "changed": result["changed"],
         }
@@ -159,7 +197,10 @@ async def _async_write_resource(hass: HomeAssistant, call: ServiceCall) -> Servi
             canonical_by_actual.get(actual_href, actual_href): verified
             for actual_href, verified in sequence["verified"].items()
         }
-    return response
+    # One json_safe at the boundary rather than per field: `before`/`after`
+    # and every verified rep are whatever the appliance sent, and a service
+    # response ends at a JSON encoder (see registry/encode.py).
+    return cast(ServiceResponse, json_safe(response))
 
 
 async def _async_read_resource(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
@@ -174,12 +215,15 @@ async def _async_read_resource(hass: HomeAssistant, call: ServiceCall) -> Servic
         # the appliance reported, without the fields this integration merges
         # on for its own use (see coordinator.entity_resources).
         snapshot: dict[str, Any] = {"resources": coordinator.device_resources(subdevice)}
-        return cast(ServiceResponse, snapshot)
+        return cast(ServiceResponse, json_safe(snapshot))
 
+    # A `?a=b&c=d` suffix becomes URI-Query options, e.g. `if=oic.if.b` to
+    # ask a /device/<n> Collection for its batch rather than its links.
+    path, query = split_href_query(href)
     # Same normalize-before-translate order as the write path above.
-    canonical = normalize_href(href)
+    canonical = normalize_href(path)
     actual_href = subdevice.to_actual(canonical)
-    code, rep, body = await coordinator.async_raw_read(actual_href)
+    code, rep, body = await coordinator.async_raw_read(actual_href, query)
     read_result: dict[str, Any] = {
         "href": canonical,
         "actual_href": actual_href,
@@ -187,6 +231,8 @@ async def _async_read_resource(hass: HomeAssistant, call: ServiceCall) -> Servic
         "raw_code": code,
         "rep": rep,
     }
+    if query:
+        read_result["query"] = list(query)
     # `body` only when it isn't the Property map already in `rep` -- a
     # Collection (`/device/0`, `/sec/devices`) answers a CBOR list, which
     # `rep` can't carry and which used to vanish into an empty-looking
@@ -194,11 +240,66 @@ async def _async_read_resource(hass: HomeAssistant, call: ServiceCall) -> Servic
     # duplicating every rep in every response.
     if body is not None and not isinstance(body, dict):
         read_result["body"] = body
-    return cast(ServiceResponse, read_result)
+    return cast(ServiceResponse, json_safe(read_result))
+
+
+async def _async_observe_resource(hass: HomeAssistant, call: ServiceCall) -> ServiceResponse:
+    coordinator, subdevice, _device_id = _resolve_target(hass, call)
+    path, query = split_href_query(call.data[ATTR_HREF])
+    canonical = normalize_href(path)
+    actual_href = subdevice.to_actual(canonical)
+    observed = await coordinator.async_observe_resource(
+        actual_href, query, call.data[ATTR_DURATION]
+    )
+    code, rep, body = observed["get"]
+    get_fields = set(rep)
+    pushed_fields = {
+        key for _t, body in observed["notifications"] if isinstance(body, dict) for key in body
+    }
+    result: dict[str, Any] = {
+        "href": canonical,
+        "actual_href": actual_href,
+        "get": {"code": f"{code >> 5}.{code & 0x1F:02d}", "rep": rep},
+        "notifications": [{"t": t, "rep": body} for t, body in observed["notifications"]],
+        "fields_only_in_notifications": sorted(pushed_fields - get_fields),
+        "already_observed": observed["already_observed"],
+        "session_dropped": observed["session_dropped"],
+    }
+    # A Collection answers a list, which `rep` can't carry (issue #335).
+    if body is not None and not isinstance(body, dict):
+        result["get"]["body"] = body
+    if query:
+        result["query"] = list(query)
+    if observed["truncated"]:
+        result["truncated"] = True
+    return cast(ServiceResponse, json_safe(result))
+
+
+async def _async_start_cooking(hass: HomeAssistant, call: ServiceCall) -> None:
+    coordinator, subdevice, _device_id = _resolve_target(hass, call)
+    temperature = call.data.get(ATTR_TEMPERATURE)
+    if temperature is not None:
+        # Given in Home Assistant's unit, as the setpoint entity shows it;
+        # the oven takes its own.
+        unit = cook.device_unit(coordinator.device_resources(subdevice))
+        if unit is not None:
+            temperature = TemperatureConverter.convert(
+                temperature,
+                hass.config.units.temperature_unit,
+                UnitOfTemperature.CELSIUS if unit == "Celsius" else UnitOfTemperature.FAHRENHEIT,
+            )
+    duration = call.data.get(ATTR_DURATION)
+    await coordinator.async_start_cooking(
+        subdevice,
+        mode=call.data.get(ATTR_MODE),
+        temperature=temperature,
+        duration=int(duration.total_seconds()) if duration is not None else None,
+    )
 
 
 def async_setup_services(hass: HomeAssistant) -> None:
-    """Register the write_resource/read_resource services (issue #300).
+    """Register start_cooking (issue #473), write_resource/read_resource
+    (issue #300) and observe_resource (issue #607).
 
     Called once from `async_setup`, not per config entry: services are
     process-global, and `hass.services.async_register` on an
@@ -213,6 +314,12 @@ def async_setup_services(hass: HomeAssistant) -> None:
     async def _handle_read(call: ServiceCall) -> ServiceResponse:
         return await _async_read_resource(hass, call)
 
+    async def _handle_observe(call: ServiceCall) -> ServiceResponse:
+        return await _async_observe_resource(hass, call)
+
+    async def _handle_start_cooking(call: ServiceCall) -> None:
+        await _async_start_cooking(hass, call)
+
     hass.services.async_register(
         DOMAIN,
         SERVICE_WRITE_RESOURCE,
@@ -226,4 +333,17 @@ def async_setup_services(hass: HomeAssistant) -> None:
         _handle_read,
         schema=_READ_RESOURCE_SCHEMA,
         supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_OBSERVE_RESOURCE,
+        _handle_observe,
+        schema=_OBSERVE_RESOURCE_SCHEMA,
+        supports_response=SupportsResponse.ONLY,
+    )
+    hass.services.async_register(
+        DOMAIN,
+        SERVICE_START_COOKING,
+        _handle_start_cooking,
+        schema=_START_COOKING_SCHEMA,
     )

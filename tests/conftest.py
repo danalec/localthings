@@ -1,9 +1,21 @@
 import json
 from pathlib import Path
+from typing import Any, cast
 
 import pytest
 
 FIXTURES = Path(__file__).resolve().parent / "fixtures"
+
+
+@pytest.fixture(autouse=True)
+def _no_live_port_rediscovery(monkeypatch):
+    """A failed handshake asks the device which port it moved to, over the
+    real network. Tests that drive a failed connect would otherwise wait out
+    that lookup against an address nothing answers on."""
+    monkeypatch.setattr(
+        "custom_components.localthings.probing.moved_secure_port",
+        lambda host, current, device_id=None: None,
+    )
 
 
 def _resources_from_dump(dump: dict) -> dict[str, dict]:
@@ -33,41 +45,71 @@ def _load_device_full(name: str):
     belong to no batch, e.g. the hand-read /multidevice/vs/0 in the
     ARTIK051_DONGLE_FAC_18K fixture) is folded into `seeds` here, since
     FakeCoapSession answers both shapes off the same href key.
+
+    `probes` runs through `from_json_safe`, so an entry may carry a binary
+    rep as the marker `read_resource`/diagnostics emit for one (see
+    registry/encode.py) and the fake session hands the caller real `bytes`,
+    exactly as a device would.
     """
+    from custom_components.localthings.registry.encode import from_json_safe
+
     data = json.loads((FIXTURES / f"{name}_device.json").read_text())
     resources = _resources_from_dump(data)
-    seeds = {**data.get("seeds", {}), **data.get("probes", {})}
+    seeds = {**data.get("seeds", {}), **from_json_safe(data.get("probes", {}))}
     return resources, data.get("oic_res", []), seeds
 
 
+def linked_parent(hass, info) -> tuple[str, str] | None:
+    """The identifier of the device `info` links under, or None if unlinked.
+
+    device_info_for names the parent by identifier or by registry id
+    depending on the core (see custom_components/localthings/devices.py);
+    reading it back through the registry keeps a test asserting the link
+    itself rather than which spelling the installed HA wanted.
+    """
+    from homeassistant.helpers import device_registry as dr
+
+    raw = cast("dict[str, Any]", info)
+    if (parent := raw.get("via_device")) is not None:
+        return parent
+    if (device_id := raw.get("via_device_id")) is None:
+        return None
+    row = dr.async_get(hass).async_get(device_id)
+    return next(iter(row.identifiers)) if row is not None else None
+
+
 class FakeCoapSession:
-    """Minimal stand-in for smartthings_local's DtlsCoapSession, backed by a
-    fixture's `seeds` map (raw device0-batch-shaped lists keyed by seed
-    href -- plus any `probes` entries, which are plain Property maps rather
-    than batch lists; both are just CBOR bodies at this layer, and the two
-    readers in registry.subdevices already type-check what they get back).
-    Enough surface for registry.subdevices.enumerate_subdevices and
-    LocalThingsCoordinator's blocking subdevice polls to run against fixture
-    data without a live device -- same idea as test_identity.py's
+    """Minimal stand-in for a Transport, backed by a fixture's `seeds` map
+    (raw device0-batch-shaped lists keyed by seed href -- plus any `probes`
+    entries, which are plain Property maps rather than batch lists; a
+    transport hands both back decoded, and the two readers in
+    registry.subdevices already type-check what they get back). Enough
+    surface for registry.subdevices.enumerate_subdevices and
+    LocalThingsCoordinator's blocking subdevice polls to run against
+    fixture data without a live device -- same idea as test_identity.py's
     FakeSession, but keyed by href string (post path-join) rather than a
     path tuple, since callers here pass a `seed_path` tuple straight
     through.
     """
 
+    # The Transport protocol requires it; observe attempts are gated on it.
+    supports_observe = True
+
     def __init__(self, seeds: dict[str, list] | None = None):
         self.seeds = seeds or {}
 
-    def get(self, path, timeout=None):
+    def read(self, path, timeout=None):
         href = "/" + "/".join(path)
         body = self.seeds.get(href)
         if body is None:
-            return 0x84, b""  # 4.04 not found -- tolerated absence
-        import cbor2
-
-        return 0x45, cbor2.dumps(body)
+            return 0x84, None  # 4.04 not found -- tolerated absence
+        return 0x45, body
 
     def pace(self):
         pass
+
+    def diagnostics(self):
+        return {}
 
 
 def _discover_full(resources: dict[str, dict], oic_res, seeds: dict[str, list], device_types=()):

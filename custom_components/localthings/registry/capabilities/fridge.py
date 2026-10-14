@@ -15,7 +15,9 @@ segments.
 """
 
 import datetime
+from dataclasses import dataclass
 
+from ..batch import is_stub_rep
 from ..capability import Capability
 from ..entities import (
     BinarySensorDesc,
@@ -25,7 +27,7 @@ from ..entities import (
     SwitchDesc,
     TimeDesc,
 )
-from .common import int_or_none, normalize_temp_unit
+from .common import filter_reset_button, int_or_none, normalize_temp_unit
 
 # Display names for the beverage zone, flex zone, ice type, and
 # ice-making-status enums below live in translations/en.json, keyed by the
@@ -173,19 +175,22 @@ DEFINITE_TEMPERATURE_FREEZER = Capability(
     ),
 )
 
-ICEMAKER_NIGHTTIME = Capability(
-    href="/icemaker/nighttime/vs/0",
-    poll_tier="warm",
+# The app's "AI precise cooling" setting (#599, AILITE_REF_25K). Older
+# boards list the resource empty, so the switch needs the field.
+DEFROST_PREDICTION = Capability(
+    href="/defrost/prediction/vs/0",
+    poll_tier="cold",
     entities=(
         SwitchDesc(
-            key="ice_night_mode",
-            field="ice.night.status",
-            icon="mdi:weather-night",
+            key="ai_precise_cooling",
+            field="ai.cooling.care",
+            icon="mdi:snowflake-thermometer",
             entity_category="config",
+            exists_fn=lambda rep, resources: "ai.cooling.care" in rep,
             value_fn=lambda v: v == "On",
             write_fn=lambda p, rep, href=None: (
-                ["icemaker", "nighttime", "vs", "0"],
-                {"ice.night.status": "On" if p == "On" else "Off"},
+                ["defrost", "prediction", "vs", "0"],
+                {"ai.cooling.care": "On" if p == "On" else "Off"},
             ),
         ),
     ),
@@ -295,6 +300,7 @@ AIR_FILTER = Capability(
             entity_category="diagnostic",
             value_fn=lambda v: v.lower() if isinstance(v, str) else v,
         ),
+        filter_reset_button("air_filter_reset", "/filter/airdustfilter/vs/0"),
     ),
 )
 
@@ -325,6 +331,9 @@ STATUS_LOCK = Capability(
             entity_category="config",
             value_fn=lambda v: v == "On",
             write_fn=_status_lock_write("x.com.samsung.da.device.sound"),
+            # Absent on the winecellar and AILITE_REF_25K (issue #495) boards;
+            # ungated, it read as a permanently-off switch that did nothing.
+            exists_fn=lambda rep, resources: "x.com.samsung.da.device.sound" in rep,
         ),
         # Auto Door Open's own voice/sound feedback toggles (issue #328,
         # TP1X_REF_21K family) -- siblings of auto_door_opener above, not
@@ -350,6 +359,23 @@ STATUS_LOCK = Capability(
             value_fn=lambda v: v == "On",
             write_fn=_status_lock_write("x.com.samsung.da.ado.soundcontrol"),
             exists_fn=lambda rep, resources: "x.com.samsung.da.ado.soundcontrol" in rep,
+        ),
+        # How far Auto Door Open swings the door (issue #495, AILITE_REF_25K):
+        # ado.mode against the board's own ado.supportedModes
+        # (EASY_OPEN/WIDE_OPEN). The write contract is guessed as a plain
+        # partial-rep POST of the same field, the shape every other
+        # /status/lock/vs/0 toggle above uses -- needs live confirmation.
+        SelectDesc(
+            key="auto_door_mode",
+            field="x.com.samsung.da.ado.mode",
+            icon="mdi:door-open",
+            entity_category="config",
+            options_field="x.com.samsung.da.ado.supportedModes",
+            exists_fn=lambda rep, resources: bool(rep.get("x.com.samsung.da.ado.supportedModes")),
+            write_fn=lambda p, rep, href=None: (
+                ["status", "lock", "vs", "0"],
+                {"x.com.samsung.da.ado.mode": p},
+            ),
         ),
     ),
 )
@@ -385,11 +411,9 @@ AUTO_DOOR_TIMER = Capability(
 # /autodoor/<variant>/vs/0 -- one per fridge sub-type sharing the Auto Door
 # Open feature (single-door, kimchi, winecellar seen so far; issue #328).
 # Each reports only x.com.samsung.da.ado.openOptions, declaring which open
-# styles that variant supports -- every dump seen so far carries exactly
-# one option ('Single') with no paired desired/current field to make a
-# choice against, the same "no real choice to expose yet" shape as
-# ignored.py's /mode/0. Bound with no entities to record coverage; revisit
-# if a device ever reports more than one option.
+# styles that variant supports ('Single', or issue #495's ['Right', 'All']
+# per French-door compartment). No desired/current field or confirmed write
+# accompanies it, so it's bound with no entities to record coverage.
 #
 # A pattern cap rather than one entry per variant: match_fn (not just the
 # prefix) is what actually gates this, so a future variant href needs no
@@ -439,6 +463,7 @@ DEODOR_FILTER = Capability(
             entity_category="diagnostic",
             value_fn=lambda v: v.lower() if isinstance(v, str) else v,
         ),
+        filter_reset_button("deodor_filter_reset", "/filter/deodorfilter/vs/0"),
     ),
 )
 
@@ -574,6 +599,63 @@ AUTOFILL = Capability(
     ),
 )
 
+
+_PROXIMITY_LEVELS = {
+    "0": "nearest",
+    "1": "near",
+    "2": "middle",
+    "3": "far",
+}
+_PROXIMITY_RAW_BY_LEVEL = {level: raw for raw, level in _PROXIMITY_LEVELS.items()}
+
+
+def _proximity_level(value):
+    return _PROXIMITY_LEVELS.get(str(value))
+
+
+def _proximity_options(resources):
+    rep = resources.get("/proximity/vs/0") or {}
+    supported = rep.get("supportedLevels")
+    if not isinstance(supported, (list, tuple)):
+        return []
+    return [str(value) for value in supported if _proximity_level(value) is not None]
+
+
+def _proximity_display(value, _resources):
+    return _proximity_level(value)
+
+
+def _proximity_write(value, rep, href=None):
+    value = str(value)
+    raw = value if value in _PROXIMITY_LEVELS else _PROXIMITY_RAW_BY_LEVEL.get(value.casefold())
+    supported_levels = rep.get("supportedLevels")
+    if not isinstance(supported_levels, (list, tuple)):
+        return None
+    supported = {str(item) for item in supported_levels}
+    if raw is None or raw not in supported:
+        return None
+    return ["proximity", "vs", "0"], {"currentLevel": raw}
+
+
+def _proximity_setting_exists(rep, resources):
+    return is_stub_rep(rep) or (
+        _proximity_level(rep.get("currentLevel")) is not None
+        and bool(_proximity_options(resources))
+    )
+
+
+def _proximity_sense_exists(rep, _resources):
+    return is_stub_rep(rep) or _proximity_level(rep.get("desiredSenseLevel")) is not None
+
+
+def _proximity_sense_options(resources):
+    rep = resources.get("/proximity/vs/0") or {}
+    supported = rep.get("supportedSenseLevels")
+    if not isinstance(supported, (list, tuple)):
+        return []
+    return [level for value in supported if (level := _proximity_level(value)) is not None]
+
+
 WELCOME_LIGHTING = Capability(
     href="/proximity/vs/0",
     poll_tier="warm",
@@ -589,20 +671,44 @@ WELCOME_LIGHTING = Capability(
                 {"status": "On" if p == "On" else "Off"},
             ),
         ),
+        SelectDesc(
+            key="welcome_lighting_proximity",
+            field="currentLevel",
+            icon="mdi:motion-sensor",
+            entity_category="config",
+            options=_proximity_options,
+            display_fn=_proximity_display,
+            exists_fn=_proximity_setting_exists,
+            value_fn=_proximity_level,
+            write_fn=_proximity_write,
+        ),
+        # desiredSenseLevel freezes while welcome lighting is off, so it is
+        # firmware diagnostics rather than a live motion-detection entity.
+        SensorDesc(
+            key="welcome_lighting_sense_level",
+            field="desiredSenseLevel",
+            icon="mdi:motion-sensor",
+            entity_category="diagnostic",
+            enabled_default=False,
+            device_class="enum",
+            options=_proximity_sense_options,
+            exists_fn=_proximity_sense_exists,
+            value_fn=_proximity_level,
+        ),
     ),
 )
 
-# Enhanced cabinet light nighttime schedule: night.starttime is an ISO
-# datetime (only the time portion matters), night.duration.minute is the
-# window length. End time is derived so both time entities write back to
-# the same resource without stepping on each other: writing start
-# preserves duration; writing end recalculates it.
+# Night windows (the cabinet light's schedule, the icemaker's "Don't make
+# ice at night"): a UTC ISO start (only the time matters), a duration in
+# minutes and the board's UTC offset. The end is derived so both time
+# entities write to the same resource without stepping on each other:
+# writing the start keeps the duration; writing the end recalculates it.
 
 _NIGHT_BRIGHTNESS_OPTIONS = ("33", "66", "100")
 
 
-def _tz_offset(rep) -> datetime.timedelta:
-    s = rep.get("timezone.offset", "+00:00")
+def _tz_offset(rep, key: str) -> datetime.timedelta:
+    s = rep.get(key, "+00:00")
     try:
         sign = 1 if s[0] == "+" else -1
         h, m = map(int, s[1:].split(":"))
@@ -621,55 +727,115 @@ def _parse_night_time(iso_str, offset=datetime.timedelta(0)) -> "datetime.time |
         return None
 
 
-def _night_start_value(rep) -> "datetime.time | None":
-    return _parse_night_time(rep.get("night.starttime"), _tz_offset(rep))
+@dataclass(frozen=True)
+class _NightWindow:
+    """Where one resource keeps its window."""
 
+    path: tuple[str, ...]
+    start: str
+    duration: str
+    offset: str
 
-def _night_end_value(rep) -> "datetime.time | None":
-    start_t = _parse_night_time(rep.get("night.starttime"), _tz_offset(rep))
-    duration_str = rep.get("night.duration.minute")
-    if start_t is None or duration_str is None:
-        return None
-    try:
-        duration = int(duration_str)
-    except (ValueError, TypeError):
-        return None
-    return (
-        (
-            datetime.datetime.combine(datetime.date.today(), start_t)
-            + datetime.timedelta(minutes=duration)
+    def start_value(self, rep) -> "datetime.time | None":
+        return _parse_night_time(rep.get(self.start), _tz_offset(rep, self.offset))
+
+    def end_value(self, rep) -> "datetime.time | None":
+        start_t = self.start_value(rep)
+        if start_t is None:
+            return None
+        try:
+            duration = int(rep.get(self.duration))
+        except (ValueError, TypeError):
+            return None
+        return (
+            (
+                datetime.datetime.combine(datetime.date.today(), start_t)
+                + datetime.timedelta(minutes=duration)
+            )
+            .time()
+            .replace(second=0)
         )
-        .time()
-        .replace(second=0)
-    )
+
+    def start_write(self, p, rep, href=None):
+        utc_dt = datetime.datetime.combine(datetime.date.today(), p) - _tz_offset(rep, self.offset)
+        try:
+            new_dt = datetime.datetime.fromisoformat(rep.get(self.start) or "").replace(
+                hour=utc_dt.hour, minute=utc_dt.minute, second=0
+            )
+        except (ValueError, TypeError):
+            new_dt = utc_dt
+        return list(self.path), {self.start: new_dt.strftime("%Y-%m-%dT%H:%M:%S")}
+
+    def end_write(self, p, rep, href=None):
+        # The offset cancels out, so the duration is worked out in local time.
+        start_t = self.start_value(rep)
+        if start_t is None:
+            return None
+        start_min = start_t.hour * 60 + start_t.minute
+        end_min = p.hour * 60 + p.minute
+        return list(self.path), {self.duration: str((end_min - start_min) % (24 * 60))}
 
 
-def _night_start_write(p, rep, href=None):
-    # p is local time; subtract offset to get UTC for storage
-    offset = _tz_offset(rep)
-    utc_dt = datetime.datetime.combine(datetime.date.today(), p) - offset
-    old_iso = rep.get("night.starttime") or ""
-    try:
-        new_dt = datetime.datetime.fromisoformat(old_iso).replace(
-            hour=utc_dt.hour, minute=utc_dt.minute, second=0
-        )
-    except (ValueError, TypeError):
-        new_dt = utc_dt
-    return ["cabinet", "light", "enhanced", "vs", "0"], {
-        "night.starttime": new_dt.strftime("%Y-%m-%dT%H:%M:%S"),
-    }
+_CABINET_NIGHT = _NightWindow(
+    path=("cabinet", "light", "enhanced", "vs", "0"),
+    start="night.starttime",
+    duration="night.duration.minute",
+    offset="timezone.offset",
+)
+
+# The app shows the window next to the switch (#599, AILITE_REF_25K).
+_ICE_NIGHT = _NightWindow(
+    path=("icemaker", "nighttime", "vs", "0"),
+    start="ice.night.starttime",
+    duration="ice.night.duration",
+    offset="ice.night.timezone",
+)
+
+ICEMAKER_NIGHTTIME = Capability(
+    href="/icemaker/nighttime/vs/0",
+    poll_tier="warm",
+    entities=(
+        SwitchDesc(
+            key="ice_night_mode",
+            field="ice.night.status",
+            icon="mdi:weather-night",
+            entity_category="config",
+            value_fn=lambda v: v == "On",
+            write_fn=lambda p, rep, href=None: (
+                list(_ICE_NIGHT.path),
+                {"ice.night.status": "On" if p == "On" else "Off"},
+            ),
+        ),
+        TimeDesc(
+            key="ice_night_start",
+            field="",
+            icon="mdi:clock-start",
+            entity_category="config",
+            exists_fn=lambda rep, resources: is_stub_rep(rep) or _ICE_NIGHT.start in rep,
+            rep_fn=_ICE_NIGHT.start_value,
+            write_fn=_ICE_NIGHT.start_write,
+        ),
+        TimeDesc(
+            key="ice_night_end",
+            field="",
+            icon="mdi:clock-end",
+            entity_category="config",
+            # The end is worked out from the start, so it needs both.
+            exists_fn=lambda rep, resources: (
+                is_stub_rep(rep) or (_ICE_NIGHT.start in rep and _ICE_NIGHT.duration in rep)
+            ),
+            rep_fn=_ICE_NIGHT.end_value,
+            write_fn=_ICE_NIGHT.end_write,
+        ),
+    ),
+)
 
 
-def _night_end_write(p, rep, href=None):
-    # duration = end_local - start_local; offset cancels so work in local time
-    start_t = _parse_night_time(rep.get("night.starttime"), _tz_offset(rep))
-    if start_t is None:
+def _night_lighting_schedule_write(p, rep, href=None):
+    if p not in ("On", "Off"):
         return None
-    start_min = start_t.hour * 60 + start_t.minute
-    end_min = p.hour * 60 + p.minute
-    duration = (end_min - start_min) % (24 * 60)
     return ["cabinet", "light", "enhanced", "vs", "0"], {
-        "night.duration.minute": str(duration),
+        "light.control.status": p,
     }
 
 
@@ -677,6 +843,15 @@ CABINET_LIGHT_ENHANCED = Capability(
     href="/cabinet/light/enhanced/vs/0",
     poll_tier="warm",
     entities=(
+        SwitchDesc(
+            key="night_lighting_schedule",
+            field="light.control.status",
+            icon="mdi:weather-night",
+            entity_category="config",
+            exists_fn=lambda rep, resources: is_stub_rep(rep) or "light.control.status" in rep,
+            value_fn=lambda v: v == "On",
+            write_fn=_night_lighting_schedule_write,
+        ),
         SelectDesc(
             key="day_brightness",
             field="level.brightness.daytime",
@@ -706,16 +881,16 @@ CABINET_LIGHT_ENHANCED = Capability(
             field="",
             icon="mdi:clock-start",
             entity_category="config",
-            rep_fn=_night_start_value,
-            write_fn=_night_start_write,
+            rep_fn=_CABINET_NIGHT.start_value,
+            write_fn=_CABINET_NIGHT.start_write,
         ),
         TimeDesc(
             key="night_end",
             field="",
             icon="mdi:clock-end",
             entity_category="config",
-            rep_fn=_night_end_value,
-            write_fn=_night_end_write,
+            rep_fn=_CABINET_NIGHT.end_value,
+            write_fn=_CABINET_NIGHT.end_write,
         ),
     ),
 )

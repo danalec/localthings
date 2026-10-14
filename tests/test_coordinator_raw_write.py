@@ -10,7 +10,6 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock
 
-import cbor2
 import pytest
 from homeassistant.core import HomeAssistant
 from homeassistant.exceptions import ServiceValidationError
@@ -34,23 +33,29 @@ ENTRY_DATA = {
 
 
 class _FakeRawWriteSession:
-    """Stand-in for DtlsCoapSession: records every POST verbatim and
-    answers the follow-up GET with a canned representation -- no real
+    """Stand-in for a Transport: records every write verbatim and answers
+    the follow-up read with a canned representation -- no real
     DTLS/network involved."""
 
-    def __init__(self, post_code: int = 0x44, get_rep: dict | None = None):
-        self.post_calls: list[tuple[list[str], bytes]] = []
+    def __init__(
+        self,
+        post_code: int = 0x44,
+        get_rep: dict | None = None,
+        post_response: object = None,
+    ):
+        self.post_calls: list[tuple[list[str], dict]] = []
         self.get_calls: list[list[str]] = []
         self._post_code = post_code
         self._get_rep = {} if get_rep is None else get_rep
+        self._post_response = post_response
 
-    def post(self, path_segs, payload, timeout=None):
-        self.post_calls.append((list(path_segs), payload))
-        return self._post_code, b""
+    def write(self, path_segs, body, timeout=None):
+        self.post_calls.append((list(path_segs), body))
+        return self._post_code, self._post_response
 
-    def get(self, path_segs, timeout=None):
+    def read(self, path_segs, timeout=None):
         self.get_calls.append(list(path_segs))
-        return 0x45, cbor2.dumps(self._get_rep)
+        return 0x45, self._get_rep
 
     def pace(self):
         pass
@@ -80,9 +85,9 @@ async def test_raw_write_splits_href_and_posts_exact_body(coordinator) -> None:
     code, new_rep = await coordinator.async_raw_write("/course/vs/0", body)
 
     assert len(fake.post_calls) == 1
-    posted_path, posted_bytes = fake.post_calls[0]
+    posted_path, posted_body = fake.post_calls[0]
     assert posted_path == ["course", "vs", "0"]
-    assert cbor2.loads(posted_bytes) == body
+    assert posted_body == body
 
     assert code == 0x44
     assert new_rep == {"x.field": "after"}
@@ -117,9 +122,15 @@ async def test_raw_write_rejects_empty_dict(coordinator) -> None:
         await coordinator.async_raw_write("/washer/vs/0", {})
 
 
-async def test_raw_write_rejects_non_dict_payload(coordinator) -> None:
+async def test_raw_write_rejects_a_payload_that_is_neither_rep_nor_batch(coordinator) -> None:
+    """A list is a Collection batch now (issue #473), but only one whose
+    elements are `{href, rep}` -- a list of bare strings is still nothing
+    this can send."""
     with pytest.raises(ServiceValidationError):
         await coordinator.async_raw_write("/washer/vs/0", ["not", "a", "dict"])  # type: ignore[arg-type]
+
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_raw_write("/washer/vs/0", "a string")  # type: ignore[arg-type]
 
 
 async def test_raw_write_rejects_empty_href(coordinator) -> None:
@@ -142,3 +153,78 @@ async def test_raw_write_validation_errors_do_not_touch_the_session(coordinator)
 
     assert coordinator._session is None
     coordinator.async_request_refresh.assert_not_awaited()
+
+
+# ----------------------------------------------------------------------
+# Collection batch payloads (issue #473)
+# ----------------------------------------------------------------------
+
+
+async def test_raw_write_accepts_a_batch_with_a_rep_less_marker(coordinator) -> None:
+    """The measured cook start leads with a bare `{"href": "/devices/0"}`.
+    Whether that marker is load-bearing is one of the things a caller runs
+    this path to find out, so a payload carrying it has to be sendable."""
+    fake = _FakeRawWriteSession(post_code=0x44)
+    coordinator._session = fake
+    body = [{"href": "/devices/0"}, {"href": "/mode/vs/0", "rep": {"x.modes": ["Bake"]}}]
+
+    await coordinator.async_raw_write_sequence(
+        [{"href": "/device/0", "payload": body, "readback": False}]
+    )
+
+    assert fake.post_calls[0][1] == body
+
+
+async def test_raw_write_rejects_an_empty_batch(coordinator) -> None:
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_raw_write_sequence([{"href": "/device/0", "payload": []}])
+
+
+async def test_raw_write_rejects_an_oversized_batch(coordinator) -> None:
+    body = [{"href": f"/mode/vs/{i}", "rep": {"x": i}} for i in range(17)]
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_raw_write_sequence([{"href": "/device/0", "payload": body}])
+
+
+@pytest.mark.parametrize(
+    "element",
+    [
+        "not-an-object",
+        {"rep": {"x": 1}},  # no href
+        {"href": "  ", "rep": {"x": 1}},  # blank href
+        {"href": "/mode/vs/0", "rep": "not-an-object"},
+        {"href": "/mode/vs/0", "rep": [{"x": 1}]},
+    ],
+)
+async def test_raw_write_rejects_a_malformed_batch_element(coordinator, element) -> None:
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_raw_write_sequence([{"href": "/device/0", "payload": [element]}])
+
+
+async def test_raw_write_batch_validation_does_not_touch_the_session(coordinator) -> None:
+    """Same posture as every other rejected write: nothing goes out."""
+    assert coordinator._session is None
+
+    with pytest.raises(ServiceValidationError):
+        await coordinator.async_raw_write_sequence(
+            [{"href": "/device/0", "payload": [{"no": "href"}]}]
+        )
+
+    assert coordinator._session is None
+    coordinator.async_request_refresh.assert_not_awaited()
+
+
+async def test_raw_read_reports_an_undecodable_body_raw_with_its_real_code(coordinator) -> None:
+    """Undecodable bytes are what a debug read exists to surface, so they
+    come back as-is under the code the device actually sent."""
+    from custom_components.localthings.transport import DecodeError
+
+    class _Undecodable(_FakeRawWriteSession):
+        def read(self, path_segs, timeout=None, query=()):
+            raise DecodeError("truncated", code=0x45, payload=b"\x18")
+
+    coordinator._session = _Undecodable()
+
+    code, rep, body = await coordinator.async_raw_read("/mode/vs/0")
+
+    assert (code, rep, body) == (0x45, {}, b"\x18")

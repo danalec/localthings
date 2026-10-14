@@ -6,6 +6,7 @@ import asyncio
 import contextlib
 import time
 from datetime import timedelta
+from typing import Any, cast
 from unittest.mock import AsyncMock, patch
 
 import cbor2
@@ -19,21 +20,26 @@ from smartthings_local.errors import SessionClosedError, SessionError, SessionTi
 
 from custom_components.localthings.const import (
     CONF_BYPASS_REMOTE_CONTROL,
+    CONF_DEVICE_TOKEN,
     CONF_HOST,
+    CONF_LEGACY_FAMILY,
+    CONF_TRANSPORT,
     DOMAIN,
     DTLS_LOCAL_PORT_BASE,
     SUMMARY_INTERVAL_S,
+    TRANSPORT_LEGACY_HTTP,
 )
 from custom_components.localthings.coordinator import (
     _RECOVERY_RETRY_S,
     LocalThingsCoordinator,
     _local_source_port,
 )
-from custom_components.localthings.observe import MODE_OBSERVE, MODE_POLL, PUSH_HEALTH_WINDOW_S
+from custom_components.localthings.observe import MODE_OBSERVE, MODE_POLL
 from custom_components.localthings.registry.capabilities.common import (
     remote_control_enabled,
     remote_control_required_for_write,
 )
+from custom_components.localthings.registry.subdevices import MAIN, Subdevice
 
 from .conftest import (
     ENTRY_DATA,
@@ -151,6 +157,37 @@ def test_run_discovery_detects_washer_via_model_fallback(hass: HomeAssistant, mo
     coordinator = LocalThingsCoordinator(hass, mock_entry)
     coordinator._run_discovery(resources)
     assert coordinator.device_type_name == "washer"
+
+
+def test_run_discovery_treats_an_unmapped_legacy_family_as_unrecognized(
+    hass: HomeAssistant,
+) -> None:
+    """Its identity alone must not route it: the description below would
+    type as a washer, but nothing of the device beyond identity was read."""
+    from pytest_homeassistant_custom_component.common import MockConfigEntry
+
+    entry = MockConfigEntry(
+        domain=DOMAIN,
+        data={
+            **ENTRY_DATA,
+            CONF_TRANSPORT: TRANSPORT_LEGACY_HTTP,
+            CONF_LEGACY_FAMILY: "TP6X_WASHER_NEXT",
+            CONF_DEVICE_TOKEN: "tok",
+        },
+        unique_id="localthings_unmapped",
+        version=4,
+    )
+    entry.add_to_hass(hass)
+    resources = {
+        "/information/vs/0": {
+            "x.com.samsung.da.modelNum": "TP6X_WW9000|FF18E000|2001",
+            "x.com.samsung.da.description": "TP6X_WASHER_NEXT",
+            "x.com.samsung.da.serialNum": "TEST-SERIAL",
+        },
+    }
+    coordinator = LocalThingsCoordinator(hass, entry)
+    coordinator._run_discovery(resources)
+    assert coordinator.device_type_name is None
 
 
 def test_run_discovery_falls_back_to_host_for_placeholder_serial(
@@ -273,7 +310,7 @@ def test_run_discovery_detects_cooktop_via_resource_signature(
     coordinator = LocalThingsCoordinator(hass, mock_entry)
     coordinator._run_discovery(_load_device("cooktop"))
 
-    assert coordinator.device_type_name == "gas_cooktop"
+    assert coordinator.device_type_name == "cooktop"
     assert coordinator._unbound_hrefs == []
 
 
@@ -461,15 +498,6 @@ async def test_reconnect_while_observe_mode_downgrades_to_poll(
     assert entered is True
     assert coordinator.observe_mode == MODE_OBSERVE
 
-    # Age out the notify so recently_notified() is False — a poll failure
-    # with a recent notify is now treated as evidence the session is
-    # still alive (see test_poll_failure_skips_reconnect_when_push_is_healthy)
-    # and would not trigger a reconnect at all. This test covers a
-    # genuinely dead channel: no recent push, poll fails, reconnect fires.
-    last_notify_ts = coordinator._observe._last_notify_ts
-    assert last_notify_ts is not None
-    coordinator._observe._last_notify_ts = last_notify_ts - (PUSH_HEALTH_WINDOW_S + 1)
-
     # Simulate the existing "poll failed, reconnecting" branch: _poll_once
     # fails once (triggering the reconnect/backoff path), then succeeds.
     # The device stops notifying on subscribe, so the immediate resubscribe
@@ -521,10 +549,6 @@ async def test_total_poll_failure_downgrades_observe_mode_to_poll(
     assert entered is True
     assert coordinator.observe_mode == MODE_OBSERVE
 
-    last_notify_ts = coordinator._observe._last_notify_ts
-    assert last_notify_ts is not None
-    coordinator._observe._last_notify_ts = last_notify_ts - (PUSH_HEALTH_WINDOW_S + 1)
-
     with (
         patch(
             "custom_components.localthings.coordinator.LocalThingsCoordinator._poll_once",
@@ -575,15 +599,88 @@ def test_defer_reconnect_for_still_tolerates_an_ambiguous_timeout(
     assert coordinator._defer_reconnect_for(SessionTimeoutError()) is False
 
 
-async def test_poll_timeout_skips_reconnect_when_push_is_healthy(
+class _HalfDeadSession:
+    """A session whose /device/0 transfer times out, and whose /oic/d
+    either answers (`answers=True`, a slow transfer) or times out too (the
+    half-dead session of issue #507)."""
+
+    def __init__(self, answers: bool) -> None:
+        self.answers = answers
+        self.reads: list[list[str]] = []
+
+    def pace(self) -> None:
+        pass
+
+    def read(self, path_segs, timeout=None):
+        self.reads.append(list(path_segs))
+        if list(path_segs) == ["oic", "d"] and self.answers:
+            return 0x45, {"n": "Range"}
+        raise SessionTimeoutError()
+
+
+def test_poll_timeout_on_a_half_dead_session_closes_it_at_once(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """Issue #507: when the probe gets no answer either, the timeout must
+    not count toward the slow-transfer tolerance. It surfaces as a
+    non-TimeoutError so _defer_reconnect_for reconnects this cycle."""
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._discovered = True
+    sess = _HalfDeadSession(answers=False)
+    coordinator._session = cast(Any, sess)
+
+    with (
+        patch.object(coordinator, "_close_session") as mock_close,
+        pytest.raises(RuntimeError) as err,
+    ):
+        coordinator._poll_once()
+
+    assert sess.reads == [["device", "0"], ["oic", "d"]]
+    mock_close.assert_called_once()
+    assert coordinator._defer_reconnect_for(err.value) is False
+
+
+def test_poll_timeout_on_a_slow_session_keeps_the_tolerance(
+    hass: HomeAssistant, mock_entry
+) -> None:
+    """When the probe answers, the transfer was merely slow: the
+    TimeoutError goes through untouched and the session stays open, which
+    keeps the dishwasher fix from 569029c."""
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._discovered = True
+    sess = _HalfDeadSession(answers=True)
+    coordinator._session = cast(Any, sess)
+
+    with (
+        patch.object(coordinator, "_close_session") as mock_close,
+        pytest.raises(TimeoutError),
+    ):
+        coordinator._poll_once()
+
+    assert sess.reads == [["device", "0"], ["oic", "d"]]
+    mock_close.assert_not_called()
+
+
+def test_poll_timeout_before_discovery_skips_the_probe(hass: HomeAssistant, mock_entry) -> None:
+    """Before discovery a timeout reconnects regardless, so the probe would
+    only add its wait to entry setup."""
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    sess = _HalfDeadSession(answers=False)
+    coordinator._session = cast(Any, sess)
+
+    with pytest.raises(TimeoutError):
+        coordinator._poll_once()
+
+    assert sess.reads == [["device", "0"]]
+
+
+async def test_lone_poll_timeout_keeps_observe_mode(
     hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
 ) -> None:
-    """A poll (summary GET) TimeoutError with a recent OBSERVE notify must
-    not reconnect or downgrade at all — the notify proves the DTLS session
-    and its subscriptions are still alive, so the GET failure is just a
-    choked blockwise transfer on a slow device, not a dead channel. This
-    is the fix for a flaky device (e.g. a slow dishwasher) repeatedly
-    tearing down a healthy observe session on nothing but a poll hiccup."""
+    """A poll TimeoutError that reaches _defer_reconnect_for has already
+    passed the liveness probe in _poll_once, so it is a slow transfer: one
+    of them must not reconnect or downgrade. This is what keeps a slow
+    dishwasher from tearing down a healthy observe session every cycle."""
     fake = mock_coordinator_observe_session
     await hass.config_entries.async_setup(mock_entry.entry_id)
     await hass.async_block_till_done()
@@ -618,14 +715,11 @@ async def test_poll_timeout_skips_reconnect_when_push_is_healthy(
     mock_close.assert_not_called()
 
 
-async def test_poll_timeout_reconnects_after_consecutive_limit_even_with_push(
+async def test_poll_timeout_reconnects_after_consecutive_limit(
     hass: HomeAssistant, mock_entry, mock_coordinator_observe_session, fridge_resources
 ) -> None:
-    """Push health only matters at the moment of the failing poll — if
-    notifies later go stale too (not supplied here, so recently_notified()
-    becomes False once the window elapses) a run of consecutive timeouts
-    must still escalate to a reconnect, so a genuinely dead channel isn't
-    stuck forever just because it looked healthy once."""
+    """A run of consecutive slow-transfer timeouts in observe mode still
+    escalates to a reconnect once it reaches the limit."""
     fake = mock_coordinator_observe_session
     await hass.config_entries.async_setup(mock_entry.entry_id)
     await hass.async_block_till_done()
@@ -643,12 +737,6 @@ async def test_poll_timeout_reconnects_after_consecutive_limit_even_with_push(
     )
     assert entered is True
     assert coordinator.observe_mode == MODE_OBSERVE
-
-    # No notify is recent any more, so every timeout below counts toward
-    # the consecutive-timeout limit instead of being deferred.
-    last_notify_ts = coordinator._observe._last_notify_ts
-    assert last_notify_ts is not None
-    coordinator._observe._last_notify_ts = last_notify_ts - (PUSH_HEALTH_WINDOW_S + 1)
 
     # Call _async_update_data directly rather than via
     # async_request_refresh() — the coordinator's built-in debouncer
@@ -683,15 +771,13 @@ async def test_poll_timeout_reconnects_after_consecutive_limit_even_with_push(
     assert coordinator.observe_mode == MODE_POLL
 
 
-async def test_poll_timeout_counter_resets_when_push_is_healthy_again(
-    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+async def test_notify_does_not_reset_poll_timeout_count(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session, fridge_resources
 ) -> None:
-    """Timeouts accrued during a quiet stretch must not survive into a
-    later burst of healthy push — otherwise an intermittently-active
-    device could reconnect on old timeouts even though push just proved
-    the session alive. The counter means "consecutive timeouts with no
-    push activity to vouch for the session," not just "consecutive
-    timeouts count.\""""
+    """A notify proves the appliance still pushes, not that it still answers
+    requests (issue #507): a range kept notifying on a session no GET got
+    through on, and resetting the count on each notify kept that session
+    from ever being reconnected."""
     fake = mock_coordinator_observe_session
     await hass.config_entries.async_setup(mock_entry.entry_id)
     await hass.async_block_till_done()
@@ -708,31 +794,32 @@ async def test_poll_timeout_counter_resets_when_push_is_healthy_again(
         0.8,
     )
     assert entered is True
-    assert coordinator.observe_mode == MODE_OBSERVE
 
-    # Age the notify out so timeouts accrue toward the limit.
-    last_notify_ts = coordinator._observe._last_notify_ts
-    assert last_notify_ts is not None
-    coordinator._observe._last_notify_ts = last_notify_ts - (PUSH_HEALTH_WINDOW_S + 1)
     with patch(
         "custom_components.localthings.coordinator.LocalThingsCoordinator._poll_once",
         side_effect=TimeoutError("GET /device/0 block 11 timeout"),
     ):
         for _ in range(coordinator._POLL_TIMEOUT_LIMIT - 1):
+            fake.on_notification(hrefs[0], cbor2.dumps({"notified": True}))
             await coordinator._async_update_data()
     assert coordinator._consecutive_poll_timeouts == coordinator._POLL_TIMEOUT_LIMIT - 1
 
-    # A fresh notify proves push is healthy again — the next timeout must
-    # not add to the pre-existing count, and must not reconnect.
     fake.on_notification(hrefs[0], cbor2.dumps({"notified": True}))
-    with patch(
-        "custom_components.localthings.coordinator.LocalThingsCoordinator._poll_once",
-        side_effect=TimeoutError("GET /device/0 block 11 timeout"),
+    fake.notify_on_subscribe = None
+    with (
+        patch(
+            "custom_components.localthings.coordinator.LocalThingsCoordinator._poll_once",
+            side_effect=[TimeoutError("GET /device/0 block 11 timeout"), fridge_resources],
+        ) as mock_poll,
+        patch(
+            "custom_components.localthings.coordinator.asyncio.sleep",
+            new=AsyncMock(),
+        ),
     ):
         await coordinator._async_update_data()
 
+    assert mock_poll.call_count == 2, "the limit-reaching timeout must reconnect"
     assert coordinator._consecutive_poll_timeouts == 0
-    assert coordinator.observe_mode == MODE_OBSERVE
 
 
 async def test_reconnect_from_observe_mode_resubscribes_immediately(
@@ -761,14 +848,6 @@ async def test_reconnect_from_observe_mode_resubscribes_immediately(
     assert entered is True
     assert coordinator.observe_mode == MODE_OBSERVE
 
-    # Age out the notify so recently_notified() is False and the poll
-    # failure below actually triggers a reconnect (see
-    # test_poll_failure_skips_reconnect_when_push_is_healthy for the
-    # healthy-push case, which now skips reconnecting entirely).
-    last_notify_ts = coordinator._observe._last_notify_ts
-    assert last_notify_ts is not None
-    coordinator._observe._last_notify_ts = last_notify_ts - (PUSH_HEALTH_WINDOW_S + 1)
-
     # If a stale retry timer (rather than an immediate resubscribe) were
     # driving recovery, mode would still be 'poll' right after this single
     # refresh call — the 600s gate wouldn't have elapsed yet.
@@ -786,6 +865,26 @@ async def test_reconnect_from_observe_mode_resubscribes_immediately(
         await hass.async_block_till_done()
 
     assert coordinator.observe_mode == MODE_OBSERVE
+
+
+async def test_attempt_observe_mode_skips_a_transport_with_no_observe(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    """The 8888 bridge is request/response and says so with
+    `supports_observe = False`. Before this, the subscribe burst still ran
+    every cycle and every href logged a warning for a capability the
+    transport had never claimed -- four of them every ten minutes, forever,
+    against a real appliance."""
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    coordinator._session.supports_observe = False  # ty: ignore[invalid-assignment]
+
+    with patch.object(coordinator._observe, "subscribe_hrefs") as subscribe:
+        await coordinator._attempt_observe_mode()
+
+    assert subscribe.called is False
+    assert coordinator.observe_mode == MODE_POLL
 
 
 async def test_attempt_observe_mode_discards_stale_commit_after_session_swap(
@@ -1182,7 +1281,7 @@ async def test_write_marks_href_pending_before_post(
     bound = BoundEntity(href="/test/vs/0", capability=coordinator.bound[0].capability, desc=desc)
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, 5)
 
     assert coordinator._observe._settle_until.get("/some/path") is not None
@@ -1219,7 +1318,7 @@ async def test_send_command_applies_write_optimistically_before_settling(
     bound = BoundEntity(href="/test/vs/0", capability=coordinator.bound[0].capability, desc=desc)
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, 5)
 
     # The optimistic value is visible right away at the write's real
@@ -1233,6 +1332,47 @@ async def test_send_command_applies_write_optimistically_before_settling(
     applied = coordinator._observe.apply("/some/path", {"value": 0}, source="observe")
     assert applied is False
     assert coordinator._cache.get("/some/path") == {"value": 5}
+
+
+async def test_write_only_button_does_not_manufacture_cache_state(
+    hass: HomeAssistant,
+    mock_entry,
+    mock_coordinator_observe_session,
+) -> None:
+    """A command-only field the appliance never returns must not survive as
+    optimistic cache state or gain a settle guard that blocks its empty GET."""
+    from custom_components.localthings.registry.capabilities import range as range_caps
+    from custom_components.localthings.registry.discovery import BoundEntity
+    from custom_components.localthings.registry.entities import ButtonDesc
+
+    fake = mock_coordinator_observe_session
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    coordinator._cache.apply_rep(
+        "/configuration/vs/0",
+        {"rt": ["x.com.samsung.da.configuration"]},
+        source="test",
+    )
+    desc = range_caps.RANGE_CLOCK_SYNC.entities[0]
+    assert isinstance(desc, ButtonDesc)
+    bound = BoundEntity(
+        href="/configuration/vs/0",
+        capability=range_caps.RANGE_CLOCK_SYNC,
+        desc=desc,
+    )
+
+    with (
+        patch.object(fake, "subscribe"),
+        patch.object(coordinator, "async_request_refresh", new_callable=AsyncMock),
+    ):
+        fake.write = lambda *a, **k: (0x44, None)
+        await coordinator.async_send_command(bound, desc.payload)
+
+    assert coordinator._cache.get("/configuration/vs/0") == {
+        "rt": ["x.com.samsung.da.configuration"]
+    }
+    assert coordinator._observe._settle_until.get("/configuration/vs/0") is None
 
 
 async def test_climate_power_write_applies_to_its_own_href_not_bound_href(
@@ -1262,7 +1402,7 @@ async def test_climate_power_write_applies_to_its_own_href_not_bound_href(
     )
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, ("power", True))
 
     assert (coordinator._cache.get("/power/vs/0") or {}).get("x.com.samsung.da.power") == "On"
@@ -1317,7 +1457,7 @@ async def test_send_command_survives_stale_confirm_poll(
         patch.object(fake, "subscribe"),
         patch.object(LocalThingsCoordinator, "_poll_once", side_effect=_stale_confirm_poll),
     ):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, 5)
 
     # The optimistic value is visible right away and survived the stale
@@ -1368,7 +1508,7 @@ async def test_send_command_reconnects_and_retries_after_socket_closed(
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionError("socket closed")
-        return (0x44, b"")
+        return 0x44, None
 
     def _drop_session():
         coordinator._session = None
@@ -1388,7 +1528,7 @@ async def test_send_command_reconnects_and_retries_after_socket_closed(
             new=AsyncMock(),
         ),
     ):
-        fake.post = _post
+        fake.write = _post
         await coordinator.async_send_command(bound, 5)
 
     assert reconnects["n"] == 1
@@ -1449,7 +1589,7 @@ async def test_send_command_raises_after_reconnect_retry_also_fails(
         ),
         pytest.raises(HomeAssistantError),
     ):
-        fake.post = _post
+        fake.write = _post
         await coordinator.async_send_command(bound, 5)
 
     assert coordinator.observe_mode == MODE_POLL
@@ -1497,7 +1637,7 @@ async def test_send_command_reconnect_downgrades_observe_mode(
         calls["n"] += 1
         if calls["n"] == 1:
             raise ConnectionError("socket closed")
-        return (0x44, b"")
+        return 0x44, None
 
     with (
         patch.object(fake, "subscribe") as mock_subscribe,
@@ -1506,7 +1646,7 @@ async def test_send_command_reconnect_downgrades_observe_mode(
             new=AsyncMock(),
         ),
     ):
-        fake.post = _post
+        fake.write = _post
         await coordinator.async_send_command(bound, 5)
 
         # _resubscribe_due is consumed by this same call's own trailing
@@ -1559,7 +1699,7 @@ async def test_second_write_to_same_href_lands_during_first_writes_settle_window
     )
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound_a, "Eco")
         assert coordinator._cache.get("/test/vs/0") == {"cycle": "Eco"}
 
@@ -1661,10 +1801,10 @@ async def test_send_command_blocked_when_remote_control_disabled(
     def _post(*a, **k):
         nonlocal posted
         posted = True
-        return (0x44, b"")
+        return 0x44, None
 
     with patch.object(fake, "subscribe"):
-        fake.post = _post
+        fake.write = _post
         with pytest.raises(ServiceValidationError) as exc_info:
             await coordinator.async_send_command(bound, 5)
 
@@ -1698,10 +1838,59 @@ async def test_send_command_allowed_when_remote_control_enabled(
     bound = BoundEntity(href="/test/vs/0", capability=coordinator.bound[0].capability, desc=desc)
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, 5)
 
     assert coordinator._cache.get("/some/path") == {"value": 5}
+
+
+async def test_send_command_waived_write_only_is_not_read_back(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    """A write-only resource that waives Remote Control (the clock) reads back
+    empty, so confirming it would always report the write as not taken."""
+    from custom_components.localthings.registry.discovery import BoundEntity
+    from custom_components.localthings.registry.entities import ButtonDesc
+
+    fake = mock_coordinator_observe_session
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    coordinator._cache.apply_rep(
+        "/remotectrl/vs/0",
+        {"x.com.samsung.da.remoteControlEnabled": "false"},
+        source="test",
+    )
+
+    def _write_fn(payload, rep, href=None):
+        return (["some", "path"], {"value": payload})
+
+    desc = ButtonDesc(key="test", write_fn=_write_fn, write_only=True, needs_remote_control=False)
+    bound = BoundEntity(href="/test/vs/0", capability=coordinator.bound[0].capability, desc=desc)
+    written = []
+
+    with (
+        patch.object(fake, "subscribe"),
+        patch.object(fake, "read", create=True, return_value=(0x45, {})) as read,
+        patch.object(LocalThingsCoordinator, "_CONFIRM_DELAY_S", 0.0),
+    ):
+        fake.write = lambda *a, **k: written.append(a) or (0x44, None)
+        await coordinator.async_send_command(bound, "2026-10-10T12:00:00")
+
+    assert written
+    # Sub-polls can read meanwhile; a read-back is the read made with the
+    # write timeout.
+    assert not [
+        c
+        for c in read.call_args_list
+        if c.kwargs.get("timeout") == LocalThingsCoordinator._POST_TIMEOUT_S
+    ]
+
+
+def test_clock_sync_button_waives_remote_control() -> None:
+    from custom_components.localthings.registry.capabilities import range as range_caps
+
+    assert range_caps.RANGE_CLOCK_SYNC.entities[0].needs_remote_control is False
 
 
 async def test_send_command_remote_control_check_precedes_validate_fn(
@@ -1734,6 +1923,124 @@ async def test_send_command_remote_control_check_precedes_validate_fn(
     with pytest.raises(ServiceValidationError) as exc_info:
         await coordinator.async_send_command(bound, "On")
     assert exc_info.value.translation_key == "remote_control_disabled"
+
+
+_LOWER_CAVITY = Subdevice(kind="indexed", key="2", seed_path=("device", "2"))
+
+
+def _smart_control(coordinator, href, enabled):
+    coordinator._cache.apply_rep(
+        href, {"x.com.samsung.da.remoteControlEnabled": enabled}, source="test"
+    )
+
+
+async def test_lower_cavity_write_follows_its_own_smart_control(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    """Each cavity of a dual-cavity oven has its own Smart Control (#300's
+    NW9000KD reports /remotectrl/vs/2), so the upper cavity's being off
+    must not block a write to the lower one."""
+    from custom_components.localthings.registry.discovery import BoundEntity
+    from custom_components.localthings.registry.entities import NumberDesc
+
+    fake = mock_coordinator_observe_session
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    _smart_control(coordinator, "/remotectrl/vs/0", "false")
+    _smart_control(coordinator, "/remotectrl/vs/2", "true")
+
+    def _write_fn(payload, rep, href=None):
+        return (["some", "path"], {"value": payload})
+
+    desc = NumberDesc(key="test", field="value", write_fn=_write_fn)
+    bound = BoundEntity(
+        href="/test/vs/2",
+        capability=coordinator.bound[0].capability,
+        desc=desc,
+        subdevice=_LOWER_CAVITY,
+    )
+
+    with patch.object(fake, "subscribe"):
+        fake.write = lambda *a, **k: (0x44, None)
+        await coordinator.async_send_command(bound, 5)
+
+
+async def test_smart_control_is_read_per_cavity(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+
+    _smart_control(coordinator, "/remotectrl/vs/0", "true")
+    _smart_control(coordinator, "/remotectrl/vs/2", "false")
+    assert coordinator._remote_control_enabled(MAIN) is True
+    assert coordinator._remote_control_enabled(_LOWER_CAVITY) is False
+
+    _smart_control(coordinator, "/remotectrl/vs/0", "false")
+    _smart_control(coordinator, "/remotectrl/vs/2", "true")
+    assert coordinator._remote_control_enabled(MAIN) is False
+    assert coordinator._remote_control_enabled(_LOWER_CAVITY) is True
+
+
+async def test_subdevice_without_its_own_smart_control_follows_main(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    _smart_control(coordinator, "/remotectrl/vs/0", "false")
+
+    assert coordinator._remote_control_enabled(_LOWER_CAVITY) is False
+
+
+async def test_send_command_select_validate_fn_rejects_idle_oven_mode(
+    hass: HomeAssistant, mock_entry, mock_coordinator_observe_session
+) -> None:
+    """The oven mode select lists NoOperation so the idle state displays
+    (#445). Selecting it must raise a ServiceValidationError with the
+    catalog key, and nothing may reach the device -- the same shape as the
+    remote-control gate, replacing write_fn's warning-and-return."""
+    from custom_components.localthings.registry.capabilities.oven import OVEN_MODE
+    from custom_components.localthings.registry.discovery import BoundEntity
+
+    fake = mock_coordinator_observe_session
+    await hass.config_entries.async_setup(mock_entry.entry_id)
+    await hass.async_block_till_done()
+    coordinator: LocalThingsCoordinator = hass.data[DOMAIN][mock_entry.entry_id]
+    coordinator._cache.apply_rep(
+        "/remotectrl/vs/0",
+        {"x.com.samsung.da.remoteControlEnabled": "true"},
+        source="test",
+    )
+    coordinator._cache.apply_rep(
+        "/mode/vs/0",
+        {
+            "x.com.samsung.da.supportedModes": ["Bake", "Broil"],
+            "x.com.samsung.da.modes": ["NoOperation"],
+        },
+        source="test",
+    )
+    desc = OVEN_MODE.entities[0]
+    bound = BoundEntity(href="/mode/vs/0", capability=OVEN_MODE, desc=desc)
+
+    posted = []
+
+    def _post(path_segs, body, *a, **k):
+        posted.append((path_segs, body))
+        return 0x44, None
+
+    with patch.object(fake, "subscribe"):
+        fake.write = _post
+        with pytest.raises(ServiceValidationError) as exc_info:
+            await coordinator.async_send_command(bound, "NoOperation")
+        assert exc_info.value.translation_domain == DOMAIN
+        assert exc_info.value.translation_key == "oven_mode_idle_not_selectable"
+        assert posted == []
+
+        await coordinator.async_send_command(bound, "Bake")
+    assert posted and posted[0][0] == ["mode", "vs", "0"]
 
 
 async def test_send_command_bypasses_remote_control_when_option_enabled(
@@ -1773,7 +2080,7 @@ async def test_send_command_bypasses_remote_control_when_option_enabled(
     bound = BoundEntity(href="/test/vs/0", capability=coordinator.bound[0].capability, desc=desc)
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, 5)
 
     assert coordinator._cache.get("/some/path") == {"value": 5}
@@ -1813,7 +2120,7 @@ async def test_send_command_settings_allowed_when_without_sc(
     )
 
     with patch.object(fake, "subscribe"):
-        fake.post = lambda *a, **k: (0x44, b"")
+        fake.write = lambda *a, **k: (0x44, None)
         await coordinator.async_send_command(bound, "1000")
 
     assert coordinator._cache.get("/washer/vs/0") == {
@@ -1859,10 +2166,10 @@ async def test_send_command_operational_still_blocked_when_without_sc(
     def _post(*a, **k):
         nonlocal posted
         posted = True
-        return (0x44, b"")
+        return 0x44, None
 
     with patch.object(fake, "subscribe"):
-        fake.post = _post
+        fake.write = _post
         with pytest.raises(ServiceValidationError) as exc_info:
             await coordinator.async_send_command(bound, "Run")
 
@@ -2014,3 +2321,36 @@ async def test_close_notify_sent_on_homeassistant_stop(
         await hass.async_block_till_done()
 
     mock_close.assert_awaited_once()
+
+
+def test_local_source_port_sits_above_the_ephemeral_range() -> None:
+    """49700-49955 sat inside Linux's default ip_local_port_range of
+    32768-60999, so an unrelated process could hold the port and the bind
+    failed EADDRINUSE on a host-networked install (issue #486)."""
+    from custom_components.localthings.coordinator import _local_source_port
+
+    # The offset is the last IPv4 octet, so these two are the span's ends.
+    assert _local_source_port("10.0.0.0") > 60999
+    assert _local_source_port("10.0.0.255") <= 65535
+
+
+async def test_a_rejected_token_asks_for_reauth(hass: HomeAssistant, mock_entry) -> None:
+    """Retrying can't fix a token the appliance refuses; a new one can."""
+    from homeassistant.exceptions import ConfigEntryAuthFailed
+
+    from custom_components.localthings.transport import AuthRejected
+
+    class _Refusing:
+        supports_observe = False
+
+        def read(self, path_segs, timeout=None):
+            raise AuthRejected("401")
+
+        def close(self):
+            pass
+
+    coordinator = LocalThingsCoordinator(hass, mock_entry)
+    coordinator._session = cast(Any, _Refusing())
+
+    with pytest.raises(ConfigEntryAuthFailed):
+        await coordinator._async_update_data()

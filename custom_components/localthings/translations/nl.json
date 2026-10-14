@@ -61,6 +61,9 @@
       "door_open": {
         "name": "Deur"
       },
+      "filter_blockage": {
+        "name": "Filterverstopping"
+      },
       "filter_door_status": {
         "name": "Filterdeur"
       },
@@ -115,8 +118,47 @@
       "add_wash_indicator": {
         "name": "AddWash beschikbaar"
       },
+      "pre_wash_selected": {
+        "name": "Voorwas gekozen"
+      },
+      "delay_wash_set": {
+        "name": "Uitgestelde start ingesteld"
+      },
       "stick_ble_connected": {
         "name": "Steel via BLE verbonden"
+      },
+      "cooktop_burner": {
+        "name": "Brander {number}"
+      },
+      "beep": {
+        "name": "Piep"
+      },
+      "remind_beep": {
+        "name": "Eindsignaal herinnering"
+      },
+      "display_time_auto_sync": {
+        "name": "Tijd automatisch synchroniseren"
+      },
+      "grease_filter_alarm": {
+        "name": "Vetfilteralarm"
+      },
+      "front_vent_open": {
+        "name": "Voorste ventilatie"
+      },
+      "dual_setpoint_enabled": {
+        "name": "Dubbel setpoint ingeschakeld"
+      },
+      "divider": {
+        "name": "Scheidingswand"
+      },
+      "wrinkle_prevent_active": {
+        "name": "Kreukpreventie actief"
+      },
+      "cooktop_sync_control": {
+        "name": "Gesynchroniseerde bediening"
+      },
+      "cooktop_paused": {
+        "name": "Gepauzeerd"
       }
     },
     "button": {
@@ -128,6 +170,24 @@
       },
       "auto_clean_stop": {
         "name": "Zelfreiniging stoppen"
+      },
+      "air_filter_reset": {
+        "name": "Luchtfilter resetten"
+      },
+      "air_filter_pm1_reset": {
+        "name": "PM1.0-filter resetten"
+      },
+      "hepa_filter_reset": {
+        "name": "HEPA-filter resetten"
+      },
+      "deodor_filter_reset": {
+        "name": "Geurfilter resetten"
+      },
+      "hood_filter_reset": {
+        "name": "Kapfilter resetten"
+      },
+      "filter_reset": {
+        "name": "Waterfilter resetten"
       },
       "filter_time_reset": {
         "name": "Filterteller op nul zetten"
@@ -141,8 +201,14 @@
       "start": {
         "name": "Starten"
       },
+      "sync_clock": {
+        "name": "Klok synchroniseren"
+      },
       "stop": {
         "name": "Stoppen"
+      },
+      "start_cooking": {
+        "name": "Bereiding starten"
       }
     },
     "climate": {
@@ -172,6 +238,12 @@
             }
           }
         }
+      },
+      "zone_climate": {
+        "name": "Zone 1"
+      },
+      "zone2_climate": {
+        "name": "Zone 2"
       }
     },
     "fan": {
@@ -189,6 +261,11 @@
         }
       }
     },
+    "light": {
+      "lamp": {
+        "name": "Lamp"
+      }
+    },
     "number": {
       "cook_time": {
         "name": "Bereidingstijd"
@@ -203,7 +280,7 @@
         "name": "Good Sleep"
       },
       "instance_setpoint": {
-        "name": "Instelpunt {instance_name}"
+        "name": "{instance_name} instelpunt"
       },
       "oven_setpoint": {
         "name": "Instelpunt"
@@ -228,6 +305,15 @@
       }
     },
     "select": {
+      "welcome_lighting_proximity": {
+        "name": "Nabijheidsniveau welkomstverlichting",
+        "state": {
+          "nearest": "Dichtstbij",
+          "near": "Dichtbij",
+          "middle": "Gemiddeld",
+          "far": "Ver"
+        }
+      },
       "ai_energy_level": {
         "name": "Niveau AI Energy Mode"
       },
@@ -236,6 +322,13 @@
       },
       "auto_door_timer": {
         "name": "Timer automatische deuropener"
+      },
+      "auto_door_mode": {
+        "name": "Modus automatische deuropener",
+        "state": {
+          "easy_open": "Makkelijk openen",
+          "wide_open": "Wijd openen"
+        }
       },
       "beverage_zone_mode": {
         "name": "Modus drankenzone",
@@ -253,7 +346,7 @@
         }
       },
       "cooler_temperature_setpoint": {
-        "name": "Temperatuur koelgedeelte"
+        "name": "Koelkasttemperatuur"
       },
       "day_brightness": {
         "name": "Helderheid kast",
@@ -322,7 +415,8 @@
           "88": "Zelfreiniging",
           "85": "Delicaat",
           "0c": "Express",
-          "0d": "Zelfreiniging"
+          "0d": "Zelfreiniging",
+          "87": "Alleen spoelen"
         }
       },
       "dispense_type": {
@@ -413,7 +507,27 @@
           "3a": "Hygiënisch drogen",
           "3b": "Beddengoed/Stof verwijderen",
           "3c": "Sportkleding",
-          "3d": "Spijkergoed"
+          "3d": "Spijkergoed",
+          "2f": "Intensief",
+          "30": "Sportkleding",
+          "32": "Strijkvrij",
+          "33": "Stoomhygiëne+",
+          "34": "Opfrissen met stoom",
+          "35": "Kreukvrij",
+          "36": "Luchtdrogen",
+          "3e": "Kleine lading",
+          "2e": "Eco Normaal"
+        }
+      },
+      "dryer_dry_level": {
+        "name": "Droogniveau",
+        "state": {
+          "none": "Uit",
+          "damp": "Vochtig",
+          "less": "Minder",
+          "normal": "Normaal",
+          "more": "Meer",
+          "very": "Zeer"
         }
       },
       "favorite_capacity": {
@@ -441,6 +555,7 @@
       "flex_zone_mode": {
         "name": "Modus FlexZone",
         "state": {
+          "cv_ttype_rf9000a_fridge": "Koelen",
           "cv_ttype_rf9000a_freeze": "Vriezen",
           "cv_ttype_rf9000a_softfreeze": "Zachtvriezen",
           "cv_ttype_rf9000a_meat_fish": "Vlees/vis",
@@ -450,7 +565,10 @@
           "cv_fdr_deli": "Delicatessen",
           "cv_fdr_beverage": "Dranken",
           "cv_fdr_meat": "Vlees",
-          "cv_fdr_soft_freezer": "Zachtvriezer"
+          "cv_fdr_soft_freezer": "Zachtvriezer",
+          "fconvert_freezer": "Vriezen",
+          "fconvert_fridge": "Koelen",
+          "fconvert_off": "Uit"
         }
       },
       "heated_dry": {
@@ -466,7 +584,7 @@
         "name": "Temperatuur warm water"
       },
       "ice_type": {
-        "name": "Type {instance_name}",
+        "name": "{instance_name} type",
         "state": {
           "off": "Uit",
           "whiskey_iceball_3": "3 ijsballen per dag",
@@ -516,7 +634,23 @@
           "frozen_pizza_plus": "Frozen Pizza+",
           "slow_cook": "Langzaam garen",
           "plate_warm": "Borden warmhouden",
-          "air_fry": "Airfryen"
+          "air_fry": "Airfryen",
+          "convection_roast": "Heteluchtbraden",
+          "keep_warm": "Warmhouden",
+          "bread_proof": "Deeg rijzen",
+          "dehydrate": "Drogen",
+          "self_clean": "Zelfreiniging",
+          "air_fryer": "Airfryer",
+          "upper_broil": "Grillen (boven)",
+          "upper_convection_bake": "Bakken met hetelucht (boven)",
+          "upper_convection_roast": "Heteluchtbraden (boven)",
+          "lower_bake": "Bakken (onder)",
+          "lower_convection_bake": "Bakken met hetelucht (onder)",
+          "steam_bake": "Stoombakken",
+          "steam_roast": "Stoombraden",
+          "upper_steam_bake": "Stoombakken (boven)",
+          "descale": "Ontkalken",
+          "drain": "Water aftappen"
         }
       },
       "operating_mode": {
@@ -561,7 +695,9 @@
         "state": {
           "fdr_wine": "Wijn",
           "fdr_deli": "Delicatessen",
-          "fdr_drinks": "Dranken"
+          "fdr_drinks": "Dranken",
+          "ttype_meat_fish": "Vlees/vis",
+          "ttype_rf9000a_fridge": "Koelen"
         }
       },
       "winecellar_pantry_zone_mode": {
@@ -592,6 +728,15 @@
       "rinse_cycles": {
         "name": "Spoelcycli"
       },
+      "laundry_out_time": {
+        "name": "Herinnering was uit de trommel",
+        "state": {
+          "0": "Uit",
+          "30": "Elke 30 min",
+          "60": "Elke 60 min",
+          "90": "Elke 90 min"
+        }
+      },
       "sensing_mode": {
         "name": "AI Purify-actie",
         "state": {
@@ -615,6 +760,17 @@
           "01": "Laag",
           "02": "Gemiddeld",
           "03": "Hoog"
+        }
+      },
+      "soil_level": {
+        "name": "Vuilgraad",
+        "state": {
+          "none": "Geen",
+          "extra_light": "Extra licht",
+          "light": "Licht",
+          "normal": "Normaal",
+          "heavy": "Zwaar",
+          "extra_heavy": "Extra zwaar"
         }
       },
       "sound_mode": {
@@ -650,7 +806,9 @@
           "no_spin": "Niet centrifugeren",
           "low": "Laag",
           "medium": "Gemiddeld",
-          "high": "Hoog"
+          "high": "Hoog",
+          "extra_low": "Extra laag",
+          "extra_high": "Extra hoog"
         }
       },
       "wash_temperature": {
@@ -661,23 +819,53 @@
           "cool": "Koel",
           "warm": "Warm",
           "hot": "Heet",
-          "extra_hot": "Extra heet"
+          "extra_hot": "Extra heet",
+          "tap_cold": "Koud leidingwater"
         }
       },
       "washer_cycle_table_00": {
         "name": "Programma",
         "state": {
           "01": "Normaal",
-          "70": "Intensief",
           "55": "Witte was",
+          "57": "Self Clean+",
+          "5b": "Katoen",
+          "5c": "Extra snel",
+          "5d": "Super Eco",
+          "5e": "Fijne was",
+          "5f": "Babyverzorging",
+          "60": "Outdoor",
+          "61": "Donkere was",
+          "63": "Trommel reinigen",
+          "64": "Spoelen + centrifugeren",
+          "65": "Wol",
+          "66": "Beddengoed",
+          "67": "Synthetisch",
+          "68": "Eco katoen",
+          "6b": "Alleen centrifugeren",
+          "6c": "Spijkergoed",
+          "70": "Intensief",
           "71": "Beddengoed",
           "72": "Hygiëne",
-          "77": "Strijkvrij",
-          "57": "Self Clean+",
           "73": "Spoelen + centrifugeren",
           "74": "Sportkleding",
           "75": "Fijne was",
-          "78": "Snelle was"
+          "77": "Strijkvrij",
+          "78": "Snelle was",
+          "ba": "Afpompen/centrifugeren",
+          "d0": "Katoen",
+          "d1": "Eco katoen",
+          "d2": "Synthetisch",
+          "d3": "Fijne was",
+          "d4": "Spoelen + centrifugeren",
+          "d5": "Trommel reinigen",
+          "d6": "Beddengoed",
+          "d7": "Outdoorverzorging",
+          "d8": "Wol",
+          "da": "Super Eco",
+          "db": "Super Speed",
+          "dc": "15' Snelle was",
+          "e4": "Anti-allergie"
         }
       },
       "washer_cycle_table_02": {
@@ -739,13 +927,18 @@
           "38": "Katoen drogen",
           "39": "Synthetisch drogen",
           "3a": "Trommel reinigen",
+          "51": "Super Speed",
           "52": "Eco koud",
           "53": "Intensief",
           "54": "Handdoeken",
           "55": "Sportkleding",
+          "56": "Beddengoed",
           "57": "Fijne was",
+          "5a": "Stoomhygiëne",
+          "5b": "Kleine lading",
           "5e": "Spoelen+centrifugeren",
           "60": "Self Clean+",
+          "64": "Witte was met stoom",
           "65": "Bonte was",
           "66": "Spijkergoed",
           "69": "AI wassen",
@@ -769,13 +962,23 @@
           "7d": "Beddengoed/waterdicht",
           "7e": "Self Clean",
           "7f": "Wol/fijne was",
+          "85": "Normaal met stoom",
           "86": "Diep wassen",
           "87": "Gedownload",
           "88": "Huisdierverzorging",
+          "8b": "Snelle was",
+          "8c": "AI OptiWash",
           "8f": "Intensief koud",
           "96": "Minder microvezels",
           "a0": "15' Snelle was",
-          "b0": "Gemengde was"
+          "b0": "Gemengde was",
+          "58": "Wol",
+          "5c": "Outdoor",
+          "5d": "Power spoelen",
+          "5f": "Alleen centrifugeren",
+          "63": "Power Steam",
+          "67": "Stoom anti-allergie",
+          "68": "Stoom volumineuze was"
         }
       },
       "washer_dry_level": {
@@ -845,11 +1048,93 @@
         "state": {
           "purification": "Zuivering",
           "ventilation": "Ventilatie",
-          "smartventilation": "Slimme ventilatie"
+          "smartventilation": "Slimme ventilatie",
+          "aicomfort": "AI-comfort",
+          "autoventilation": "Automatische ventilatie",
+          "freshairintake": "Verse luchttoevoer",
+          "indoorpurification": "Binnenluchtzuivering",
+          "indoordehumidification": "Binnenluchtontvochtiging"
+        }
+      },
+      "dry_time": {
+        "name": "Droogtijd"
+      },
+      "booster_fan_mode": {
+        "name": "Booster-ventilatormodus",
+        "state": {
+          "off": "Uit",
+          "auto": "Automatisch",
+          "high": "Hoog",
+          "medium": "Gemiddeld"
+        }
+      },
+      "booster_light_color_temperature": {
+        "name": "Kleurtemperatuur boosterlicht",
+        "state": {
+          "3000k": "3000 K",
+          "4000k": "4000 K",
+          "6500k": "6500 K"
+        }
+      },
+      "booster_light_brightness": {
+        "name": "Helderheid boosterlicht",
+        "state": {
+          "smart": "Slim",
+          "high": "Hoog",
+          "low": "Laag"
+        }
+      },
+      "booster_oscillation_angle": {
+        "name": "Booster-oscillatiehoek",
+        "state": {
+          "normal": "Normaal",
+          "circulation": "Circulatie",
+          "right_narrow": "Rechts smal",
+          "right_wide": "Rechts breed",
+          "left_narrow": "Links smal",
+          "left_wide": "Links breed"
+        }
+      },
+      "ai_motion_wind": {
+        "name": "AI-bewegingsluchtstroom",
+        "state": {
+          "off": "Uit",
+          "surround": "Rondom",
+          "longreach": "Groot bereik",
+          "down": "Omlaag",
+          "power": "Krachtig",
+          "windfree": "Wind-Free",
+          "aidirect": "AI direct",
+          "aiindirect": "AI indirect"
+        }
+      },
+      "wash_zone": {
+        "name": "Wasgebied",
+        "state": {
+          "on_on": "Beide korven",
+          "off_on": "Alleen onderkorf",
+          "on_off": "Alleen bovenkorf"
+        }
+      },
+      "lamp_level": {
+        "name": "Lampniveau",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "high": "Hoog"
         }
       }
     },
     "sensor": {
+      "welcome_lighting_sense_level": {
+        "name": "Detectieniveau welkomstverlichting",
+        "state": {
+          "nearest": "Dichtstbij",
+          "near": "Dichtbij",
+          "middle": "Gemiddeld",
+          "far": "Ver"
+        }
+      },
       "auto_clean_progress": {
         "name": "Auto clean voortgang"
       },
@@ -885,6 +1170,9 @@
       },
       "burner_state": {
         "name": "Status brander {number}"
+      },
+      "burner_power_level": {
+        "name": "Vermogensniveau brander {number}"
       },
       "clean_level": {
         "name": "Reinigingsniveau"
@@ -987,6 +1275,12 @@
       "current_temp_c": {
         "name": "Temperatuur"
       },
+      "food_probe_temp": {
+        "name": "Voedselsonde"
+      },
+      "food_probe_setpoint": {
+        "name": "Doeltemperatuur voedselsonde"
+      },
       "current_temperature_c": {
         "name": "Temperatuur"
       },
@@ -1008,16 +1302,19 @@
       "drum_clean_last_cleaned": {
         "name": "Trommel laatst gereinigd"
       },
-      "dry_level": {
-        "name": "Droogniveau"
-      },
-      "dry_time": {
-        "name": "Droogtijd"
+      "quick_wash": {
+        "name": "Snelwas",
+        "state": {
+          "not_used": "Niet beschikbaar",
+          "off": "Uit",
+          "on": "Aan"
+        }
       },
       "dryer_type": {
         "name": "Type droger",
         "state": {
-          "electricity": "Elektriciteit"
+          "electricity": "Elektriciteit",
+          "gas": "Gas"
         }
       },
       "dust": {
@@ -1025,6 +1322,9 @@
       },
       "energy_kwh": {
         "name": "Energie"
+      },
+      "usage_runtime_hours": {
+        "name": "Bedrijfstijd"
       },
       "energy_last_month_kwh": {
         "name": "Energie (vorige maand)"
@@ -1084,7 +1384,7 @@
         "name": "Filterverbruik"
       },
       "instance_temperature": {
-        "name": "Temperatuur {instance_name}"
+        "name": "{instance_name} temperatuur"
       },
       "job_beginning_status": {
         "name": "Status programmastart"
@@ -1150,6 +1450,7 @@
         "name": "Voortgang",
         "state": {
           "idle": "Inactief",
+          "delaywash": "Uitgestelde start",
           "weightsensing": "Beladingsdetectie",
           "wash": "Wassen",
           "rinse": "Spoelen",
@@ -1236,6 +1537,9 @@
       "zone_temperature": {
         "name": "Zonetemperatuur"
       },
+      "zone2_temperature": {
+        "name": "Temperatuur zone 2"
+      },
       "watertank_full_alarm_status": {
         "name": "Status alarm waterreservoir vol"
       },
@@ -1244,9 +1548,90 @@
       },
       "air_filter_pm1_usage_hours": {
         "name": "PM1-filtergebruik in uren"
+      },
+      "active_burners": {
+        "name": "Actieve branders"
+      },
+      "cooktop_monitoring": {
+        "name": "Kookplaatbewaking"
+      },
+      "booster_angle_location": {
+        "name": "Booster-hoekpositie"
+      },
+      "cooking_mode": {
+        "name": "Bereidingsmodus",
+        "state": {
+          "no_operation": "Niet actief",
+          "micro_wave": "Magnetron",
+          "autocook": "Automatisch koken",
+          "keep_warm": "Warmhouden"
+        }
+      },
+      "cook_time": {
+        "name": "Bereidingstijd"
+      },
+      "cook_time_remaining": {
+        "name": "Resterende bereidingstijd"
+      },
+      "cook_finish_time": {
+        "name": "Eindtijd bereiding"
+      },
+      "sub_operation": {
+        "name": "Deelbewerking"
+      },
+      "hood_fan_speed": {
+        "name": "Ventilatorsnelheid",
+        "state": {
+          "off": "Uit",
+          "low": "Laag",
+          "medium": "Gemiddeld",
+          "high": "Hoog",
+          "boost": "Boost"
+        }
+      },
+      "hood_lamp": {
+        "name": "Lamp",
+        "state": {
+          "off": "Uit",
+          "medium": "Gemiddeld",
+          "on": "Aan"
+        }
+      },
+      "dual_setpoint_cooling": {
+        "name": "Dubbel setpoint koelen"
+      },
+      "dual_setpoint_heating": {
+        "name": "Dubbel setpoint verwarmen"
+      },
+      "auto_changeover_cool_primary_offset": {
+        "name": "Automatisch omschakelen primaire offset koelen"
+      },
+      "auto_changeover_cool_secondary_offset": {
+        "name": "Automatisch omschakelen secundaire offset koelen"
+      },
+      "auto_changeover_heat_primary_offset": {
+        "name": "Automatisch omschakelen primaire offset verwarmen"
+      },
+      "auto_changeover_heat_secondary_offset": {
+        "name": "Automatisch omschakelen secundaire offset verwarmen"
+      },
+      "cooktop_device_type": {
+        "name": "Apparaattypecode"
+      },
+      "cooktop_flex_coil": {
+        "name": "Flexspoelcode"
+      },
+      "main_timer_set": {
+        "name": "Instelling hoofdtimer"
+      },
+      "burner_pan_size": {
+        "name": "Pangrootte kookzone {number}"
       }
     },
     "switch": {
+      "night_lighting_schedule": {
+        "name": "Schema nachtverlichting"
+      },
       "ai_energy_level": {
         "name": "AI Energy Mode"
       },
@@ -1364,6 +1749,9 @@
       "ice_night_mode": {
         "name": "Stille nachtmodus ijsmaker"
       },
+      "ai_precise_cooling": {
+        "name": "AI-precisiekoeling"
+      },
       "instance_enabled": {
         "name": "{instance_name} ingeschakeld"
       },
@@ -1424,6 +1812,9 @@
       "sound": {
         "name": "Geluid"
       },
+      "station_light": {
+        "name": "Stationslamp"
+      },
       "storm_wash": {
         "name": "Storm Wash+"
       },
@@ -1459,9 +1850,42 @@
       },
       "windsleep": {
         "name": "Slaapmodus"
+      },
+      "auto_detergent": {
+        "name": "Automatisch wasmiddel"
+      },
+      "auto_softener": {
+        "name": "Automatische wasverzachter"
+      },
+      "booster_light": {
+        "name": "Boosterlicht"
+      },
+      "booster_light_manual_brightness": {
+        "name": "Handmatige boosterhelderheid"
+      },
+      "booster_oscillation": {
+        "name": "Booster-oscillatie"
+      },
+      "auto_changeover": {
+        "name": "Automatisch omschakelen"
+      },
+      "interlock": {
+        "name": "Koppeling"
+      },
+      "speed_booster": {
+        "name": "Speed Booster"
+      },
+      "damp_alert": {
+        "name": "Waarschuwing vochtige was"
+      },
+      "extra_rinse": {
+        "name": "Extra spoelen"
       }
     },
     "time": {
+      "delay_finish_at": {
+        "name": "Klaar om"
+      },
       "dnd_end": {
         "name": "Einde niet storen"
       },
@@ -1473,6 +1897,12 @@
       },
       "led_night_start": {
         "name": "Start nachtverlichting deur-LED"
+      },
+      "ice_night_end": {
+        "name": "Einde stille nachtmodus ijsmaker"
+      },
+      "ice_night_start": {
+        "name": "Start stille nachtmodus ijsmaker"
       },
       "night_end": {
         "name": "Einde nachtverlichting"
@@ -1497,16 +1927,12 @@
     "step": {
       "user": {
         "title": "Samsung-apparaat toevoegen",
-        "description": "Voer het IP-adres van je Samsung-apparaat en de AC14K_M-CA-inloggegevens in waarmee apparaatcertificaten worden aangemaakt.",
+        "description": "Voer het IP-adres van je Samsung-apparaat in. LocalThings stelt het automatisch in met een zelfondertekend certificaat; de meeste apparaten hebben verder niets nodig.",
         "data": {
-          "host": "IP-adres",
-          "ca_cert_pem": "CA-certificaat (PEM)",
-          "ca_key_pem": "Privésleutel van CA (PEM)"
+          "host": "IP-adres"
         },
         "data_description": {
-          "host": "Het lokale IP-adres van je Samsung-apparaat (bijvoorbeeld 192.168.1.50).",
-          "ca_cert_pem": "De PEM-gecodeerde AC14K_M-CA-certificaatketen. Plak de volledige inhoud van je fullchain-PEM, inclusief alle blokken BEGIN CERTIFICATE en END CERTIFICATE.",
-          "ca_key_pem": "De PEM-gecodeerde AC14K_M-privésleutel. Plak de volledige inhoud, inclusief de kop- en voettekst BEGIN PRIVATE KEY en END PRIVATE KEY."
+          "host": "Het lokale IP-adres van je Samsung-apparaat (bijvoorbeeld 192.168.1.50)."
         }
       },
       "user_reuse": {
@@ -1519,26 +1945,133 @@
           "host": "Het lokale IP-adres van je Samsung-apparaat (bijvoorbeeld 192.168.1.50)."
         }
       },
+      "credential": {
+        "title": "Certificaat geweigerd",
+        "description": "{host} heeft het automatische certificaat geweigerd. Sommige apparaten gebruiken een pre-shared key in plaats van een certificaat. LocalThings kan die sleutel niet zelf verkrijgen, dus importeer er een die je al hebt. Er wordt ook een AC14K_M-CA-certificaat aangeboden, maar er is nog geen apparaat gemeld dat het automatische certificaat weigerde en dat wel accepteerde.\n\nApparaten met een pre-shared key proberen we nog te begrijpen, en je loopt er waarschijnlijk tegen problemen aan. Ons plan, wat we tot nu toe hebben ontdekt en een plek om feedback te geven staan in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Een owner-pre-shared key importeren",
+          "psk_peer": "Een peer-pre-shared key importeren",
+          "fallback_ca": "Een AC14K_M-CA-certificaat proberen"
+        }
+      },
+      "credential_psk": {
+        "title": "Dit apparaat gebruikt waarschijnlijk een pre-shared key",
+        "description": "{host} heeft het automatische certificaat geweigerd, en de onversleutelde beveiligingsgegevens geven aan dat het zich in plaats daarvan met een pre-shared key authenticeert. LocalThings kan die sleutel niet zelf verkrijgen, dus importeer er een die je al hebt. Er wordt ook een AC14K_M-CA-certificaat aangeboden, maar er is nog geen apparaat gemeld dat het automatische certificaat weigerde en dat wel accepteerde.\n\nApparaten met een pre-shared key proberen we nog te begrijpen, en je loopt er waarschijnlijk tegen problemen aan. Ons plan, wat we tot nu toe hebben ontdekt en een plek om feedback te geven staan in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Een owner-pre-shared key importeren",
+          "psk_peer": "Een peer-pre-shared key importeren",
+          "fallback_ca": "Een AC14K_M-CA-certificaat proberen"
+        }
+      },
+      "ca_rejected": {
+        "title": "Certificaat nog steeds geweigerd",
+        "description": "{host} heeft ook het certificaat geweigerd dat met die CA is ondertekend. Dat klopt met alle meldingen tot nu toe: geen apparaat dat het automatische certificaat weigerde, heeft een AC14K_M-CA geaccepteerd. Mogelijk gebruikt het een pre-shared key. Het Home Assistant-logboek bevat de exacte alert.\n\nApparaten met een pre-shared key proberen we nog te begrijpen, en je loopt er waarschijnlijk tegen problemen aan. Ons plan, wat we tot nu toe hebben ontdekt en een plek om feedback te geven staan in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Een owner-pre-shared key importeren",
+          "psk_peer": "Een peer-pre-shared key importeren",
+          "fallback_ca": "De CA opnieuw invoeren"
+        }
+      },
+      "fallback_ca": {
+        "title": "AC14K_M-CA-certificaat",
+        "description": "Plak het AC14K_M-CA-certificaat en de privésleutel. LocalThings ondertekent daarmee een apparaatcertificaat voor {host}.",
+        "data": {
+          "ca_cert_pem": "CA-certificaat (PEM)",
+          "ca_key_pem": "Privésleutel van CA (PEM)"
+        },
+        "data_description": {
+          "ca_cert_pem": "De PEM-gecodeerde AC14K_M-CA-certificaatketen. Plak de volledige inhoud van je fullchain-PEM, inclusief alle blokken BEGIN CERTIFICATE en END CERTIFICATE.",
+          "ca_key_pem": "De PEM-gecodeerde AC14K_M-privésleutel. Plak de volledige inhoud, inclusief de kop- en voettekst BEGIN PRIVATE KEY en END PRIVATE KEY."
+        }
+      },
+      "psk_owner": {
+        "title": "Owner-pre-shared key",
+        "description": "Voer de owner-pre-shared key voor {host} in. De identiteit is de OCF-owner-UUID, die wordt ingevuld als het apparaat er een meldt. LocalThings controleert de sleutel bij het apparaat, en legt vast welk apparaat antwoordde, voordat het wordt toegevoegd.\n\nApparaten met een pre-shared key proberen we nog te begrijpen, en je loopt er waarschijnlijk tegen problemen aan. Ons plan, wat we tot nu toe hebben ontdekt en een plek om feedback te geven staan in [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identiteit (owner-UUID)",
+          "psk_key": "Sleutel"
+        },
+        "data_description": {
+          "psk_key": "32 of 64 hexadecimale tekens."
+        }
+      },
+      "psk_peer": {
+        "title": "Peer-pre-shared key",
+        "description": "Voer de paarsgewijze peer-referentie in die naast Samsungs eigendom op {host} is geïnstalleerd, precies zoals het installatieprogramma die meldde. Identiteit noch sleutel kan van het apparaat worden gelezen. LocalThings controleert de sleutel bij het apparaat, en legt vast welk apparaat antwoordde, voordat het wordt toegevoegd.\n\nApparaten met een pre-shared key proberen we nog te begrijpen, en je loopt er waarschijnlijk tegen problemen aan. Ons plan, wat we tot nu toe hebben ontdekt en een plek om feedback te geven staan in [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identiteit (peer-UUID)",
+          "psk_key": "Sleutel"
+        },
+        "data_description": {
+          "psk_key": "32 of 64 hexadecimale tekens."
+        }
+      },
+      "reconfigure": {
+        "title": "Apparaatadres wijzigen",
+        "description": "Voer het huidige IP-adres van het apparaat in. De rest blijft ongewijzigd — de entiteiten, geschiedenis en automatiseringen blijven behouden.",
+        "data": {
+          "host": "IP-adres"
+        },
+        "data_description": {
+          "host": "Het lokale IP-adres van je Samsung-apparaat (bijvoorbeeld 192.168.1.50)."
+        }
+      },
       "confirm_unknown_type": {
         "title": "Apparaattype niet herkend",
         "description": "Dit apparaat meldt model \"{model}\", een type dat LocalThings nog niet herkent. Het apparaat wordt toch toegevoegd, maar alleen met algemene mogelijkheden (zoals voeding en alarmen, voor zover aanwezig), in plaats van alle mogelijkheden voor deze apparaatfamilie. Je kunt daarna helpen volledige ondersteuning toe te voegen door diagnostische gegevens voor dit apparaat te downloaden (Instellingen > Apparaten & diensten > dit apparaat > het menu > Diagnostische gegevens downloaden) en deze bij een nieuw issue te voegen. Kies Verzenden om het apparaat toch toe te voegen."
+      },
+      "legacy_token": {
+        "title": "Apparaattoken",
+        "description": "Dit apparaat ({host}) gebruikt Samsungs oudere lokale API, die naast het certificaat ook een apparaattoken nodig heeft.\n\nLaat dit leeg en verstuur het formulier om het apparaat er zelf een te laten afgeven: er wordt om een token gevraagd en het apparaat stuurt dat terug naar Home Assistant op poort 8889. Zet eerst de afstandsbediening (Smart Control) aan op het apparaat, met de deur dicht, anders verdwijnt het binnen enkele minuten van wifi en antwoordt het niet meer. Dit duurt tot anderhalve minuut.\n\nKan het apparaat Home Assistant niet bereiken op poort 8889, haal dan op een andere manier een token op en plak het hier.",
+        "data": {
+          "device_token": "Apparaattoken (leeg laten om er een aan te vragen)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Apparaattoken geweigerd",
+        "description": "{host} accepteert zijn apparaattoken niet meer. Laat dit veld leeg en verstuur om het apparaat een nieuw token te laten uitgeven (afstandsbediening aan, deur dicht en poort 8889 op Home Assistant bereikbaar), of plak een token dat je op een andere manier hebt verkregen.",
+        "data": {
+          "device_token": "Apparaattoken (leeg laten om er een aan te vragen)"
+        }
       }
     },
     "error": {
       "no_response": "Geen reactie van dat IP-adres — er kwam niets terug op enige poort in het bereik van de lokale API van het apparaat (UDP 49152-49160). Controleer of het IP-adres klopt, of het apparaat aanstaat en op hetzelfde netwerk zit als Home Assistant, en of geen firewall het UDP-verkeer ernaartoe blokkeert.",
-      "ports_closed": "Dat IP-adres is bereikbaar, maar weigerde actief elke poort in het bereik van de lokale API (UDP 49152-49160). Het is óf geen Samsung-apparaat, óf het draait oudere firmware die alleen via TCP 8888 met de cloud van Samsung praat, wat deze integratie niet kan gebruiken.",
+      "ports_closed": "Dat IP-adres is bereikbaar, maar weigerde actief elke poort in het bereik van de lokale API (UDP 49152-49160) en gaf geen enkele reactie op het ontdekkingskanaal. Het is hoogstwaarschijnlijk geen Samsung-apparaat, of een apparaat waarop de lokale API niet is ingeschakeld.",
       "no_dtls_server": "De poorten in het bereik van de lokale API zijn bereikbaar op dat adres, maar niets daar beantwoordde een DTLS-handshake. Controleer of het IP-adres bij het apparaat hoort en niet bij een ander apparaat in je netwerk.",
-      "handshake_timeout": "Het apparaat antwoordde op zijn lokale API-poort, maar voltooide de DTLS-handshake niet. Meestal houdt het de sessie van een eerdere poging nog vast — wacht ongeveer een minuut en probeer het opnieuw.",
+      "appliance_no_dtls": "Dat adres is van een Samsung-apparaat — het heeft zich via het onversleutelde ontdekkingskanaal geïdentificeerd als {model} en {port} als zijn beveiligde poort opgegeven — maar daar is nooit een DTLS-handshake voltooid. Het adres is niet het probleem. Controleer of Afstandsbediening of een vergelijkbare instelling op het bedieningspaneel van het apparaat is uitgeschakeld, en bekijk het Home Assistant-logboek voor de exacte fout.",
+      "non_appliance_stack": "Er antwoordde iets op dat IP-adres, maar het meldde zich als een OCF-dienst die geen apparaat is. Sommige Samsung-apparaten draaien er een naast hun eigen dienst, en LocalThings vindt het apparaat daarachter alleen als Home Assistant in hetzelfde netwerksegment zit. Zet Home Assistant en het apparaat in hetzelfde subnet en VLAN en probeer het opnieuw.",
+      "multiple_appliances": "Op dat IP-adres antwoordt meer dan één Samsung-apparaat, en LocalThings kan nog niet tussen ze kiezen. Meld het in de issuetracker van LocalThings en voeg het Home Assistant-logboek toe.",
+      "handshake_timeout": "Het apparaat antwoordde op zijn lokale API-poort, maar voltooide de DTLS-handshake ook na een nieuwe poging niet. Probeer het opnieuw. Blijft het mislukken, dan maakt een herstart van het apparaat de verbindingen vrij die het nog vasthoudt; de exacte fout staat in het Home Assistant-logboek.",
       "cert_rejected": "Het apparaat heeft het certificaat geweigerd. Het CA-certificaat en de sleutel zijn waarschijnlijk niet van de AC14K_M-CA die dit apparaat vertrouwt, of ze horen niet bij elkaar. Het Home Assistant-logboek bevat de precieze alert die het apparaat stuurde.",
+      "psk_rejected": "Het apparaat heeft de pre-shared key geweigerd. De identiteit of sleutel is onjuist, of hoort bij een ander apparaat of bij een eigenaar die inmiddels is gewijzigd. Het Home Assistant-logboek bevat de exacte alert.",
+      "identity_unproven": "De sleutel werkte, maar het apparaat meldde zijn OCF-apparaat-ID niet via de versleutelde verbinding. LocalThings kan dus niet bevestigen welk apparaat de sleutel heeft en voegt het niet toe. Probeer het opnieuw terwijl het apparaat wakker is. Blijft dit gebeuren, laat het ons dan weten in [issue #435]({issue_url}) met het Home Assistant-logboek erbij.",
+      "invalid_psk_identity": "Voer de identiteit in als UUID, bijvoorbeeld 12345678-1234-1234-1234-123456789abc.",
+      "psk_identity_zero_byte": "Deze UUID bevat een nulbyte die het geïnstalleerde transport niet kan verzenden. Laat de herstelde identiteit ongewijzigd.",
+      "invalid_psk_key": "Voer de sleutel in als 32 of 64 hexadecimale tekens.",
       "handshake_failed": "Het apparaat weigerde de DTLS-handshake om een reden die niets met het certificaat te maken heeft, hoogstwaarschijnlijk een protocol- of cipher-mismatch. Het Home Assistant-logboek bevat de precieze alert die het stuurde.",
       "cloud_unreachable": "Kon de cloudgateway van Samsung niet bereiken om de UUID op te halen die nodig is om het certificaat van dit apparaat aan te maken. Controleer de internettoegang van Home Assistant en probeer het opnieuw.",
       "unexpected_response": "Verbinding met het apparaat is gelukt, maar het gaf geen bruikbare apparaatbeschrijving terug. Mogelijk is het geen apparaat dat deze integratie ondersteunt. Het Home Assistant-logboek bevat wat het stuurde.",
-      "cannot_connect": "Kan geen verbinding maken met het apparaat. Controleer of het IP-adres bereikbaar is en de CA-inloggegevens juist zijn.",
+      "cannot_connect": "Kan geen verbinding maken met het apparaat. Controleer of het IP-adres klopt en of het apparaat aanstaat en met je netwerk is verbonden.",
       "invalid_ca": "Het CA-certificaat of de privésleutel kon niet worden geladen. Controleer of de PEM-inhoud juist is en of de sleutel bij het certificaat hoort.",
-      "unknown": "Onverwachte fout. Raadpleeg de Home Assistant-logboeken voor meer informatie."
+      "unknown": "Onverwachte fout. Raadpleeg de Home Assistant-logboeken voor meer informatie.",
+      "wrong_device": "Op dat adres antwoordde een Samsung-apparaat, maar niet dit apparaat — het meldde een andere identiteit. Controleer of het adres bij dit apparaat hoort. Gebruik Apparaat toevoegen om het andere toe te voegen.",
+      "token_not_received": "Er is geen apparaattoken binnengekomen. Controleer of de afstandsbediening op het apparaat aanstaat met de deur dicht en of het Home Assistant kan bereiken op poort 8889 - of plak een token dat je op een andere manier hebt opgehaald.",
+      "invalid_token": "Het apparaat heeft dat token geweigerd. Laat het veld leeg om een nieuw token aan te vragen.",
+      "callback_port_in_use": "Poort 8889 is al in gebruik op Home Assistant, meestal door een tokenaanvraag die nog wacht. Probeer het over anderhalve minuut opnieuw.",
+      "callback_cert_rejected": "Het apparaat belde terug op poort 8889, maar weigerde het zelfondertekende certificaat van Home Assistant. Plak het AC14K_M-CA-certificaat en de sleutel zodat LocalThings er een kan ondertekenen dat wel wordt geaccepteerd; daarna wordt de tokenaanvraag opnieuw uitgevoerd.",
+      "callback_ca_rejected": "Het apparaat belde terug op poort 8889, maar weigerde ook het met AC14K_M ondertekende certificaat. Plak een token dat je op een andere manier hebt verkregen; de handshakefout staat in het Home Assistant-logboek."
     },
     "abort": {
-      "already_configured": "Apparaat is al geconfigureerd"
+      "already_configured": "Apparaat is al geconfigureerd",
+      "already_in_progress": "De configuratie is al bezig",
+      "reconfigure_successful": "Adres bijgewerkt",
+      "no_entry_for_mac": "Geen enkel geconfigureerd apparaat bewaart dat MAC-adres",
+      "reauth_successful": "Het nieuwe apparaattoken werkt; het apparaat maakt opnieuw verbinding.",
+      "reauth_unsupported": "Dit apparaat heeft hier geen inloggegevens om te vernieuwen. Reageert het niet meer, verwijder het dan en voeg het opnieuw toe."
+    },
+    "progress": {
+      "legacy_token": "Wachten tot {host} een apparaattoken naar Home Assistant stuurt op poort 8889. Dit duurt tot anderhalve minuut."
     }
   },
   "options": {
@@ -1650,8 +2183,17 @@
     "remote_control_disabled": {
       "message": "Afstandsbediening is uitgeschakeld op dit apparaat. Raadpleeg de handleiding van je apparaat om afstandsbediening in te schakelen voordat Home Assistant het kan bedienen."
     },
+    "oven_mode_idle_not_selectable": {
+      "message": "NoOperation is wat de oven meldt als hij niets doet. Het kan niet als stand worden gekozen; annuleer het bakken op het bedieningspaneel van de oven."
+    },
     "debug_payload_empty": {
       "message": "De payload voor de schrijfbewerking voor foutopsporing moet een niet-leeg object zijn."
+    },
+    "debug_batch_too_many_elements": {
+      "message": "Een batchpayload moet tussen 1 en {max} elementen bevatten."
+    },
+    "debug_batch_element_invalid": {
+      "message": "Elk batch-element moet een object met href zijn, en een rep die een object is indien aanwezig."
     },
     "resource_href_required": {
       "message": "Een resource-href is vereist."
@@ -1668,8 +2210,29 @@
     "command_failed": {
       "message": "Het commando naar {href} is ook na opnieuw verbinden mislukt: {error}"
     },
+    "command_refused": {
+      "message": "Het apparaat heeft het commando naar {href} geweigerd: {error}"
+    },
+    "command_not_confirmed": {
+      "message": "Het commando naar {href} is verzonden terwijl afstandsbediening uit staat, maar het apparaat toont het nog niet. Als het niet reageert, schakel dan afstandsbediening in op het apparaat."
+    },
     "debug_read_failed": {
       "message": "Het lezen van {href} is mislukt: {error}"
+    },
+    "observe_duration_out_of_range": {
+      "message": "De duur moet groter zijn dan 0 en hoogstens {max} seconden."
+    },
+    "observe_not_supported": {
+      "message": "De interface van dit apparaat ondersteunt het observeren van resources niet."
+    },
+    "observe_query_while_observed": {
+      "message": "{href} wordt al door deze integratie geobserveerd en kan daarom niet opnieuw met een query worden geobserveerd."
+    },
+    "observe_in_progress": {
+      "message": "{href} wordt al door een andere aanroep geobserveerd. Wacht tot die klaar is."
+    },
+    "debug_observe_failed": {
+      "message": "Observeren van {href} is mislukt: {error}"
     },
     "debug_too_many_writes": {
       "message": "Geef tussen de 1 en 10 schrijfacties op."
@@ -1688,6 +2251,69 @@
     },
     "service_device_not_loaded": {
       "message": "Dit apparaat is nog niet verbonden. Probeer het opnieuw zodra het is geladen."
+    },
+    "cook_start_not_supported": {
+      "message": "Dit apparaat meldt geen bereidingsstand die op afstand gestart mag worden, dus Home Assistant kan het niet starten."
+    },
+    "cook_start_not_idle": {
+      "message": "Het apparaat is al bezig. Stop het eerst, of wijzig de temperatuur en bereidingstijd terwijl het draait."
+    },
+    "cook_mode_required": {
+      "message": "Kies eerst een bereidingsstand. Dit apparaat kan gestart worden in: {startable}."
+    },
+    "cook_mode_not_startable": {
+      "message": "{mode} kan op dit apparaat niet op afstand gestart worden. Wel mogelijk: {startable}."
+    },
+    "cook_mode_unavailable": {
+      "message": "{mode} is nu niet beschikbaar in deze ovenruimte. Wel te starten: {startable}."
+    },
+    "cook_temperature_not_supported": {
+      "message": "{mode} heeft geen temperatuurinstelling."
+    },
+    "cook_temperature_required": {
+      "message": "{mode} heeft een temperatuur nodig."
+    },
+    "cook_temperature_not_a_choice": {
+      "message": "{mode} accepteert alleen {choices}."
+    },
+    "cook_temperature_out_of_range": {
+      "message": "{mode} accepteert een temperatuur van {min} tot {max}."
+    },
+    "cook_duration_not_supported": {
+      "message": "{mode} heeft geen bereidingstijd."
+    },
+    "cook_duration_required": {
+      "message": "{mode} heeft een bereidingstijd nodig."
+    },
+    "cook_duration_out_of_range": {
+      "message": "{mode} accepteert een bereidingstijd van {min} tot {max}."
+    },
+    "extra_rinse_unavailable_for_cycle": {
+      "message": "Extra Rinse is niet beschikbaar voor het geselecteerde programma."
+    }
+  },
+  "selector": {
+    "instance_name": {
+      "options": {
+        "freezer": "Vriezer",
+        "cooler": "Koelkast",
+        "top": "Bovenste vak",
+        "middle": "Middelste vak",
+        "bottom": "Onderste vak",
+        "onedoor": "Kimchivak",
+        "winecellar_top": "Bovenste wijnzone",
+        "winecellar_bottom": "Onderste wijnzone",
+        "door_freezer": "Vriezerdeur",
+        "door_cooler": "Koelkastdeur",
+        "door_cvroom": "Flexzonedeur",
+        "door_winecellar": "Wijnkoelerdeur",
+        "door_onedoorfreezer": "Hoofddeur",
+        "door_onedoorkimchi": "Hoofddeur",
+        "ice_maker": "IJsmaker",
+        "cubed_ice": "IJsblokjes",
+        "ice_bites": "Ice Bites",
+        "whiskey_ice_ball": "IJsballen"
+      }
     }
   }
 }

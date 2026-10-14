@@ -15,10 +15,13 @@ import logging
 import threading
 import time
 from collections.abc import Callable
+from dataclasses import dataclass, field
 
 import cbor2
 from smartthings_local.ocf.observe_refresh import ObserveRefreshTask
 from smartthings_local.ocf.state_cache import StateCache
+
+from .registry.capabilities.common import merge_options_field
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -29,6 +32,22 @@ MODE_POLL = "poll"
 
 DEFAULT_SETTLE_S = 4.0
 GRACE_PERIOD_S = 15.0
+
+_OPTIONS_FIELD = "x.com.samsung.da.options"
+
+
+@dataclass
+class Tap:
+    """One observe_resource call's recording of an href's notifications.
+    `started` is stamped as the subscription goes out; nothing before it is
+    kept. `isolate` keeps what a query-qualified relation pushes out of the
+    cache, since another interface can push another shape."""
+
+    limit: int
+    isolate: bool
+    started: float | None = None
+    items: list[tuple[float, object]] = field(default_factory=list)
+    dropped: int = 0
 
 
 def _rep_diff(cached: dict, sweep: dict) -> dict:
@@ -48,12 +67,10 @@ def _rep_diff(cached: dict, sweep: dict) -> dict:
 
 SUCCESS_FRACTION = 0.8
 
-# A notify within this long counts as proof the DTLS session is alive,
-# even if the summary poll's blockwise GET just timed out on a slow
-# device. Twice the coordinator's 30s summary interval: generous enough
-# to absorb jitter, tight enough that a channel that's actually gone
-# quiet doesn't get credit for a notify from a while ago.
-PUSH_HEALTH_WINDOW_S = 60.0
+# Consecutive sweeps that find a subscribed href's cached rep out of date
+# before it goes back on the sub-poll cadence. Two, so one missed notify
+# doesn't demote an href that otherwise pushes fine.
+STALE_SWEEPS_TO_FALLBACK = 2
 
 
 def _is_alarms_href(href: str) -> bool:
@@ -93,7 +110,9 @@ class ObserveManager:
         self._cache_lock = threading.Lock()
         self.subscribed_hrefs: set[str] = set()
         self._notified: set[str] = set()
-        self._last_notify_ts: float | None = None
+        # Per subscribed href, how many sweeps in a row found it stale; see
+        # log_sweep_discrepancies. Guarded by _notify_cond like fallback_hrefs.
+        self._stale_sweeps: dict[str, int] = {}
         # Wakes try_enter_observe_mode's grace wait early once enough hrefs
         # have notified. Guards `_notified` mutations, the `wait_for`, and
         # fallback_hrefs (enter_observe_mode assignment, on_notification
@@ -101,14 +120,45 @@ class ObserveManager:
         self._notify_cond = threading.Condition()
         # Idle while polling, except after downgrade_to_poll (every href
         # that was subscribed). While in observe mode this is the set of
-        # subscribed hrefs that have not yet notified (issue #92) -- they
-        # stay on the hot/warm sub-poll cadence. on_notification discards
-        # an href once it pushes, so a late first notify self-corrects.
+        # subscribed hrefs that have not yet notified (issue #92), plus any
+        # the sweep keeps finding stale (issue #507) -- they stay on the
+        # hot/warm sub-poll cadence. on_notification discards an href once
+        # it pushes, so a late notify self-corrects.
         self.fallback_hrefs: set[str] = set()
         self._on_applied: Callable[[str, dict, str], None] | None = None
         self._refresh_task: ObserveRefreshTask | None = None
         self._refresh_stop: threading.Event | None = None
         self._refresh_thread: threading.Thread | None = None
+        # observe_resource's recordings, at most one per href. Guarded by
+        # _notify_cond, like _attempting.
+        self._taps: dict[str, Tap] = {}
+        # Hrefs a subscribe burst has registered whose attempt hasn't been
+        # committed or abandoned yet, so not in subscribed_hrefs.
+        self._attempting: set[str] = set()
+
+    def reserve_tap(self, href: str, *, limit: int, isolate: bool) -> Tap | None:
+        """A recording for `href`, or None if another call already holds
+        one. It records nothing until start_tap."""
+        with self._notify_cond:
+            if href in self._taps:
+                return None
+            tap = self._taps[href] = Tap(limit=limit, isolate=isolate)
+            return tap
+
+    def start_tap(self, tap: Tap) -> None:
+        with self._notify_cond:
+            tap.started = time.monotonic()
+
+    def release_tap(self, href: str, tap: Tap) -> None:
+        with self._notify_cond:
+            if self._taps.get(href) is tap:
+                del self._taps[href]
+
+    def coordinator_observes(self, href: str) -> bool:
+        """Whether this coordinator holds, or is setting up, a relation on
+        `href` -- one an unsubscribe of the path would also retire."""
+        with self._notify_cond:
+            return href in self.subscribed_hrefs or href in self._attempting
 
     def set_on_applied(self, callback: Callable[[str, dict, str], None]) -> None:
         """Hook run after every accepted rep, on the applying thread.
@@ -120,9 +170,27 @@ class ObserveManager:
         """
         self._on_applied = callback
 
-    def mark_write_pending(self, href: str, settle_s: float = DEFAULT_SETTLE_S) -> None:
+    def mark_write_pending(self, href: str, settle_s: float = DEFAULT_SETTLE_S) -> float:
+        """Arm the settle window; returns its deadline."""
         with self._settle_lock:
-            self._settle_until[href] = time.monotonic() + settle_s
+            deadline = time.monotonic() + settle_s
+            self._settle_until[href] = deadline
+            return deadline
+
+    def settle_deadline(self, href: str) -> float | None:
+        with self._settle_lock:
+            return self._settle_until.get(href)
+
+    def restore_write_pending(self, href: str, previous: float | None, armed: float) -> None:
+        """Undo the window a refused write armed (`armed`), back to what it
+        replaced. A newer write that has armed its own since keeps it."""
+        with self._settle_lock:
+            if self._settle_until.get(href) != armed:
+                return
+            if previous is None or previous <= time.monotonic():
+                self._settle_until.pop(href, None)
+            else:
+                self._settle_until[href] = previous
 
     def _is_settling(self, href: str) -> bool:
         with self._settle_lock:
@@ -190,7 +258,20 @@ class ObserveManager:
             self.log.debug("dropping %s update for %s (settling)", source, href)
             return False
         with self._cache_lock:
-            merged = dict(rep) if _is_alarms_href(href) else {**(self.cache.get(href) or {}), **rep}
+            prior = self.cache.get(href) or {}
+            merged = dict(rep) if _is_alarms_href(href) else {**prior, **rep}
+            # A notify's options[] carries only the tokens that changed (a
+            # washer dial change pushes just ["AvailableDelayTime_87"], issue
+            # #579), so merge it by prefix; polls and sweeps read the whole
+            # array and still replace it.
+            if (
+                source == "observe"
+                and isinstance(rep.get(_OPTIONS_FIELD), list)
+                and isinstance(prior.get(_OPTIONS_FIELD), list)
+            ):
+                merged[_OPTIONS_FIELD] = merge_options_field(
+                    prior[_OPTIONS_FIELD], rep[_OPTIONS_FIELD]
+                )
             changed = self.cache.apply_rep(href, merged, source=source)
         # Outside the cache lock -- the hook takes locks of its own and
         # never reads the cache back. `source` is passed along rather than
@@ -207,8 +288,22 @@ class ObserveManager:
             rep = cbor2.loads(payload)
         except Exception as e:
             self.log.warning("observe %s: cbor decode failed: %s", href, e)
+            rep = None
+        isolated = False
+        with self._notify_cond:
+            tap = self._taps.get(href)
+            if tap is not None and tap.started is not None:
+                # Before the checks below: what was pushed is the point.
+                if len(tap.items) < tap.limit:
+                    tap.items.append((time.monotonic(), payload if rep is None else rep))
+                else:
+                    tap.dropped += 1
+                isolated = tap.isolate and not (
+                    href in self.subscribed_hrefs or href in self._attempting
+                )
+        if isolated or not isinstance(rep, dict):
             return
-        if not isinstance(rep, dict):
+        if self._resource_type_mismatch(href, rep):
             return
         with self._notify_cond:
             self._notified.add(href)
@@ -216,37 +311,49 @@ class ObserveManager:
             # full grace period -- a late first push (blockwise refetch)
             # must drop the href so we don't keep GET-polling a live one.
             self.fallback_hrefs.discard(href)
-            self._last_notify_ts = time.monotonic()
+            self._stale_sweeps.pop(href, None)
             self._notify_cond.notify_all()
         self.log.debug("observe notify: %s", href)
         self.apply(href, rep, source="observe")
 
-    def recently_notified(self, window_s: float = PUSH_HEALTH_WINDOW_S) -> bool:
-        """True if any OBSERVE notify has arrived within `window_s`.
+    def _resource_type_mismatch(self, href: str, rep: dict) -> bool:
+        """True when a notify's `rt` names a different resource type than the
+        one already cached for `href`, so it was filed under the wrong href.
 
-        Used only to gate whether a poll (summary GET) failure should
-        close/reconnect the DTLS session — NOT to decide observe-mode
-        health in general (see `log_sweep_discrepancies` for why that
-        distinction matters: a notify recent enough to prove the session
-        itself is alive is a much stronger, narrower claim than "the
-        channel has been perfectly healthy").
+        Observe tokens are one byte and appliances appear to keep observers
+        across sessions, so a stale relation can likely share a token with a
+        new one -- the best explanation for a CAC cassette logging its
+        /wind/direction/vs/0 modes against /mode/vs/0 (issue #509). Such a
+        notify says nothing about `href`, so it is dropped before it counts
+        as that href's push. Either side lacking `rt` is no evidence.
         """
-        return (
-            self._last_notify_ts is not None and time.monotonic() - self._last_notify_ts < window_s
+        rt = rep.get("rt")
+        cached_rt = (self.cache.get(href) or {}).get("rt")
+        if not isinstance(rt, list) or not isinstance(cached_rt, list):
+            return False
+        if set(rt) == set(cached_rt):
+            return False
+        self.log.debug(
+            "observe %s: dropping notify with rt %s, cached rt is %s", href, rt, cached_rt
         )
+        return True
 
     def subscribe_hrefs(self, session, hrefs: list[str]) -> set[str]:
         """Register OBSERVE on every href; returns the ones that took.
         Blocking — run in an executor.
 
         Split from the grace wait below (issue #294) so the coordinator can
-        hold its session lock for just these sends -- each is a fire-and-
-        forget UDP datagram (DtlsCoapSession.subscribe doesn't wait for the
-        device's ack), unlike the wait, which can block for the whole grace
-        period and must not hold a lock a command write is also waiting on.
+        hold its session lock for just these sends -- each is fire-and-forget
+        (DtlsCoapSession.subscribe doesn't wait for the device's ack), but
+        since smartthings-local 0.1.9 it goes through the session's rate
+        limiter, so the hold is now about one limiter interval per href
+        (~200ms at the 5 req/s default). Still bounded, unlike the wait,
+        which can block for the whole grace period and must not hold a lock
+        a command write is also waiting on.
         """
         with self._notify_cond:
             self._notified.clear()
+            self._attempting = set(hrefs)
         subscribed: set[str] = set()
         for href in hrefs:
             segs = [s for s in href.strip("/").split("/") if s]
@@ -288,6 +395,8 @@ class ObserveManager:
         # cannot land on a set object that is about to be replaced.
         with self._notify_cond:
             self.fallback_hrefs = set(subscribed) - self._notified
+            self._stale_sweeps.clear()
+            self._attempting = set()
         self._set_mode(MODE_OBSERVE)
         self.start_refresh_task(session)
 
@@ -295,6 +404,8 @@ class ObserveManager:
         """Drop a failed or stale attempt: no subscriptions worth keeping."""
         self._stop_refresh_task()
         self.subscribed_hrefs = set()
+        with self._notify_cond:
+            self._attempting = set()
         self._set_mode(MODE_POLL)
 
     def try_enter_observe_mode(
@@ -336,6 +447,11 @@ class ObserveManager:
         for why only shared fields count). Returns True if any
         discrepancy was found (False if not in observe mode).
 
+        An href found stale on `STALE_SWEEPS_TO_FALLBACK` sweeps in a row
+        joins `fallback_hrefs`, the same as one that never pushed (issue
+        #92): it pushed once and has since gone quiet, like a range's
+        /temperatures/vs/0 through a preheat (issue #507).
+
         This never changes mode or subscriptions. The sweep already
         re-applies the full /device/0 result to the cache every cycle
         regardless of mode, so a missed notify never leaves data stale
@@ -371,17 +487,26 @@ class ObserveManager:
             if cached is None:
                 continue
             diff = _rep_diff(cached, sweep_resources[href])
-            if diff:
-                found = True
-                self.log.debug(
-                    "observe missed a change on %s (sweep disagrees with cache): %s",
-                    href,
-                    diff,
-                )
+            with self._notify_cond:
+                if not diff:
+                    self._stale_sweeps.pop(href, None)
+                    continue
+                misses = self._stale_sweeps.get(href, 0) + 1
+                self._stale_sweeps[href] = misses
+                if misses >= STALE_SWEEPS_TO_FALLBACK and href not in self.fallback_hrefs:
+                    self.fallback_hrefs.add(href)
+                    self.log.debug("%s stale on %d sweeps; sub-polling it again", href, misses)
+            found = True
+            self.log.debug(
+                "observe missed a change on %s (sweep disagrees with cache): %s",
+                href,
+                diff,
+            )
         return found
 
     def downgrade_to_poll(self) -> None:
         self.fallback_hrefs = set(self.subscribed_hrefs)
+        self._stale_sweeps.clear()
         self.subscribed_hrefs = set()
         self._stop_refresh_task()
         self._set_mode(MODE_POLL)

@@ -15,11 +15,19 @@ here; they read washer-only fields off the same shared /course/vs/0 options
 array.
 """
 
+from dataclasses import replace
+
 from ..capability import Capability
 from ..entities import BinarySensorDesc, SelectDesc, SensorDesc, SwitchDesc
 from .laundry import (
+    OPTION_KIND_RINSE,
+    OPTION_KIND_SOIL,
+    OPTION_KIND_SPIN,
+    OPTION_KIND_WATER_TEMPERATURE,
+    _course_codes_from_supported_options,
     bool_option_exists,
     bool_option_switch,
+    course_narrowed_options,
     cycle_options,
     cycle_select,
     drum_clean_cycles_remaining,
@@ -29,6 +37,7 @@ from .laundry import (
     option_write,
     washer_cycle_fallback,
 )
+from .operational import OPERATIONAL_STATE
 
 # Course_XX hex code labels (translations/en.json,
 # washer_cycle_table_02.state.<id>) come from several devices, cross-checked
@@ -72,24 +81,118 @@ from .laundry import (
 # overlapping hex values.
 # ---------------------------------------------------------------------------
 
-# /washer/vs/0 -- wash temperature, spin speed, rinse cycle count.
+# /washer/vs/0 -- wash temperature, spin speed, rinse cycle count, soil level.
 # Despite the shared href, this is unrelated to dryer.DRYER_SETTINGS (also
 # bound to '/washer/vs/0') -- an artifact of Samsung reusing the same OCF
 # path for different device families. Only one of the two ever binds for a
 # given device, since dryer and washer are separate by_type registries.
 
+
+def _enabled_write(field):
+    def write(p, rep, href=None):
+        if p not in ("On", "Off"):
+            return None
+        return ["washer", "vs", "0"], {field: p}
+
+    return write
+
+
+def _wash_control_present(name):
+    """Gate a /washer/vs/0 select on the device reporting the control at all
+    -- either its current value (`x.com.samsung.da.<name>`) or its
+    supported-values list (`...supported<Name>`).
+
+    A real washer reports at least one of the two (a top-load WA8000T, for
+    instance, has spin/rinse but no water-temperature field -- it sets
+    temperature via a water valve -- so its water-temperature select was a
+    valueless, optionless phantom). A device that shares this registry
+    without the wash surface reports neither: the microfiber lint filter
+    (issue #475) answers /washer/vs/0 with an empty rep, and these writable
+    selects would otherwise bind against nothing and post to a resource it
+    does not support.
+    """
+    value = f"x.com.samsung.da.{name}"
+    supported = f"x.com.samsung.da.supported{name[0].upper()}{name[1:]}"
+    return lambda rep, resources: value in rep or supported in rep
+
+
+_TEMPERATURE = "x.com.samsung.da.waterTemperature"
+_SUPPORTED_TEMPERATURE = "x.com.samsung.da.supportedWaterTemperature"
+_RINSE = "x.com.samsung.da.rinseCycles"
+_SUPPORTED_RINSE = "x.com.samsung.da.supportedRinseCycles"
+
+_temperature_options = course_narrowed_options(
+    OPTION_KIND_WATER_TEMPERATURE, _TEMPERATURE, _SUPPORTED_TEMPERATURE
+)
+_course_rinse_options = course_narrowed_options(OPTION_KIND_RINSE, _RINSE, _SUPPORTED_RINSE)
+
+# A 95C wash rinses at least twice on these device types. It is the rule
+# Samsung's own app applies (95C sets four rinses and a lower pick is raised
+# to two), and it is why a WW6500 refuses 0 and 1 rinses on Baby Care -- a
+# 95C course -- although the course mask allows all six.
+_HOT_WASH_DEVICE_TYPES = frozenset({"0157", "0161", "0167", "0170"})
+_HOT_WASH_MIN_RINSES = 2
+
+
+def _rinse_options(resources):
+    options = _course_rinse_options(resources)
+    course_rep = resources.get("/course/vs/0") or {}
+    device_type = option_value(course_rep.get("x.com.samsung.da.options"), "DeviceType")
+    washer_rep = resources.get("/washer/vs/0") or {}
+    if device_type not in _HOT_WASH_DEVICE_TYPES or washer_rep.get(_TEMPERATURE) != "95":
+        return options
+    live = washer_rep.get(_RINSE)
+
+    def allowed(option):
+        try:
+            return int(option) >= _HOT_WASH_MIN_RINSES
+        except ValueError:
+            return True
+
+    return [o for o in options if o == live or allowed(o)] or options
+
+
+# Drum Clean heats to 70C on boards that can heat past 60C, yet reports 60C,
+# which is also the value it takes back; Samsung's app shows 70 there. Keyed
+# by course table, because course codes mean different courses per table:
+# 0x63 is Drum Clean on Table_00 (a WW6500's dial walk).
+_DRUM_CLEAN_COURSES = {"Table_00": frozenset({"63"})}
+_DRUM_CLEAN_HOT_SUPPORT = frozenset({"70", "75", "80", "90", "95"})
+
+
+def _temperature_label(value, resources):
+    if value != "60":
+        return None
+    course_rep = resources.get("/course/vs/0") or {}
+    course = option_value(course_rep.get("x.com.samsung.da.options"), "Course")
+    table = (resources.get("/st/washercourse/vs/0") or {}).get("x.com.samsung.da.st.courseTable")
+    supported = (resources.get("/washer/vs/0") or {}).get(_SUPPORTED_TEMPERATURE) or []
+    if not isinstance(course, str) or course.upper() not in _DRUM_CLEAN_COURSES.get(table, ()):
+        return None
+    return "70" if _DRUM_CLEAN_HOT_SUPPORT.intersection(supported) else None
+
+
 WASHER_SETTINGS = Capability(
     href="/washer/vs/0",
     entities=(
+        # The wash-control selects self-gate on the device reporting
+        # the control at all (see _wash_control_present) -- invisible on real
+        # washers, which always report at least the value or its supported
+        # list, but it drops the optionless writable phantoms a device
+        # sharing this registry without a wash surface would otherwise get.
+        #
+        # Options are narrowed to the selected course, as the dryer's are.
         SelectDesc(
             key="wash_temperature",
-            field="x.com.samsung.da.waterTemperature",
+            field=_TEMPERATURE,
             icon="mdi:thermometer-water",
             entity_category="config",
-            options_field="x.com.samsung.da.supportedWaterTemperature",
+            options=_temperature_options,
+            display_fn=_temperature_label,
+            exists_fn=_wash_control_present("waterTemperature"),
             write_fn=lambda p, rep, href=None: (
                 ["washer", "vs", "0"],
-                {"x.com.samsung.da.waterTemperature": p},
+                {_TEMPERATURE: p},
             ),
         ),
         SelectDesc(
@@ -97,7 +200,12 @@ WASHER_SETTINGS = Capability(
             field="x.com.samsung.da.spinLevel",
             icon="mdi:sync",
             entity_category="config",
-            options_field="x.com.samsung.da.supportedSpinLevel",
+            options=course_narrowed_options(
+                OPTION_KIND_SPIN,
+                "x.com.samsung.da.spinLevel",
+                "x.com.samsung.da.supportedSpinLevel",
+            ),
+            exists_fn=_wash_control_present("spinLevel"),
             write_fn=lambda p, rep, href=None: (
                 ["washer", "vs", "0"],
                 {"x.com.samsung.da.spinLevel": p},
@@ -105,14 +213,53 @@ WASHER_SETTINGS = Capability(
         ),
         SelectDesc(
             key="rinse_cycles",
-            field="x.com.samsung.da.rinseCycles",
+            field=_RINSE,
             icon="mdi:water-sync",
             entity_category="config",
-            options_field="x.com.samsung.da.supportedRinseCycles",
+            options=_rinse_options,
+            exists_fn=_wash_control_present("rinseCycles"),
             write_fn=lambda p, rep, href=None: (
                 ["washer", "vs", "0"],
                 {"x.com.samsung.da.rinseCycles": p},
             ),
+        ),
+        SelectDesc(
+            key="soil_level",
+            field="x.com.samsung.da.soilLevel",
+            icon="mdi:liquid-spot",
+            entity_category="config",
+            options=course_narrowed_options(
+                OPTION_KIND_SOIL,
+                "x.com.samsung.da.soilLevel",
+                "x.com.samsung.da.supportedSoilLevel",
+            ),
+            exists_fn=_wash_control_present("soilLevel"),
+            write_fn=lambda p, rep, href=None: (
+                ["washer", "vs", "0"],
+                {"x.com.samsung.da.soilLevel": p},
+            ),
+        ),
+        # Whether each reservoir auto-dispenses at all, as opposed to the
+        # dose selects on /course/vs/0 below that set how much (issue #437,
+        # whose washer reported detergent On and softener Off in one dump).
+        # Self-gated: only boards with an auto-dispenser report the fields.
+        SwitchDesc(
+            key="auto_detergent",
+            field="x.com.samsung.da.autoDetergentEnabled",
+            icon="mdi:cup-water",
+            entity_category="config",
+            exists_fn=lambda rep, resources: "x.com.samsung.da.autoDetergentEnabled" in rep,
+            value_fn=lambda v: v == "On",
+            write_fn=_enabled_write("x.com.samsung.da.autoDetergentEnabled"),
+        ),
+        SwitchDesc(
+            key="auto_softener",
+            field="x.com.samsung.da.autoSoftenerEnabled",
+            icon="mdi:flask-outline",
+            entity_category="config",
+            exists_fn=lambda rep, resources: "x.com.samsung.da.autoSoftenerEnabled" in rep,
+            value_fn=lambda v: v == "On",
+            write_fn=_enabled_write("x.com.samsung.da.autoSoftenerEnabled"),
         ),
         # Washer/dryer combo units carry a dryLevel field on the wash
         # resource itself (issue #22). Self-gates off on plain washers,
@@ -219,48 +366,98 @@ def _dosing_low(prefix):
     )
 
 
+def _is_hex(value):
+    return (
+        isinstance(value, str) and bool(value) and all(c in "0123456789abcdefABCDEF" for c in value)
+    )
+
+
 # Bubble soak / pre-wash / intensive-wash toggles, from the same options[]
 # array (issue #22 follow-up). Each rides as a plain '<Prefix>_On'/'_Off'
 # token, confirmed against a dump taken with Bubble Soak switched on in the
 # app -- the same shape as AiOption/KidsLockBypass in this array.
 #
-# Each also has a hex-pair availability field positional with
-# editCourseList (BubbleSoakSet, PreWashAvailableSet,
-# IntensiveAvailableSet): on the reporter's dump 'F0' at a course's
-# position matched the app enabling the control there, '00' matched it
-# grayed out. exists_fn only runs once at setup, so it can't do this
-# per-course check -- validate_fn runs on every write attempt instead,
-# rejecting an on-write for a course whose byte isn't 'F0' with a
-# user-facing error rather than silently no-opping. The read/write/
-# presence machinery is laundry.bool_option_switch, shared with
-# dishwasher's storm-wash/auto-release-dry toggles; only this per-course
-# gating is washer-only.
-def _bool_option_switch(key, icon, prefix, availability_field):
-    def validate(p, rep, resources):
-        """Reject turning on when the selected course's byte in
-        `availability_field` isn't 'F0'. Turning off is never blocked.
-        Falls back to allowing the write whenever the availability data
-        can't be resolved (unrecognized course, missing/mismatched-length
-        bitmap) -- a false rejection is worse than an occasional no-op."""
-        if p != "On":
-            return None
+# Each also has a hex-pair availability field (BubbleSoakSet,
+# PreWashAvailableSet, IntensiveAvailableSet) with one byte per course: 'F0'
+# where the app enables the control, '00' where it is grayed out. The bytes
+# follow supportedOptions' course order, not editCourseList's (#511): on the
+# three dumps where the orders differ, editCourseList order would enable
+# bubble soak on Drain/Spin and gray out pre-wash on Cotton. exists_fn only
+# runs once at setup, so validate_fn does this per-course check on every
+# write instead, rejecting an on-write with a user-facing error rather than
+# silently no-opping. The read/write/presence machinery is
+# laundry.bool_option_switch, shared with dishwasher's toggles.
+#
+# Extra Rinse passes supported_options_only: its availability bytes follow
+# the supportedOptions record order, and a 25-record table against a
+# 21-entry editCourseList shows the two orders can differ -- so the
+# edit-list fallback below must not decide its bitmap. Unresolvable data
+# reports unknown and leaves the write to the appliance.
+def _bool_option_switch(key, icon, prefix, availability_field, *, supported_options_only=False):
+    def _supported_options_table(course_rep):
+        """The supportedOptions hex table, or None when it is missing or
+        malformed."""
+        table = course_rep.get("x.com.samsung.da.supportedOptions")
+        if isinstance(table, list):
+            table = table[0] if table else None
+        return table if _is_hex(table) else None
+
+    def course_supported(rep, resources):
+        """Whether the selected course allows this toggle; None when the
+        availability data can't be resolved (unrecognized course, missing
+        or mismatched-length bitmap)."""
         opts = rep.get("x.com.samsung.da.options") or []
         current = option_value(opts, "Course")
-        courses = cycle_options(resources)
+        course_rep = resources.get("/course/vs/0") or {}
+        if supported_options_only:
+            table = _supported_options_table(course_rep)
+            if table is None:
+                return None
+            course_rep = {
+                **course_rep,
+                "x.com.samsung.da.supportedOptions": table,
+            }
+            courses = _course_codes_from_supported_options(course_rep)
+        else:
+            courses = _course_codes_from_supported_options(course_rep) or cycle_options(resources)
         if not current or current not in courses:
             return None
         raw = option_value(opts, availability_field)
-        if raw is None:
+        if supported_options_only:
+            if not _is_hex(raw) or len(raw) % 2:
+                return None
+        elif raw is None:
             return None
         pairs = hex_pairs(raw)
         if len(pairs) != len(courses):
             return None
-        if pairs[courses.index(current)] != "F0":
+        return pairs[courses.index(current)] == "F0"
+
+    def validate(p, rep, resources):
+        """Reject turning on when the selected course's byte in
+        `availability_field` isn't 'F0'. Turning off is never blocked, and
+        unresolvable data allows the write -- a false rejection is worse
+        than an occasional no-op."""
+        if p != "On":
+            return None
+        supported = course_supported(rep, resources)
+        if supported is False:
             return f"{key}_unavailable_for_cycle"
         return None
 
+    def extra_attributes(rep, resources):
+        """Report whether this option is supported for the active course."""
+        supported = course_supported(rep, resources)
+        return {"course_supported": supported}
+
     return bool_option_switch(
-        key, icon, prefix, entity_category="config", gate_on_presence=True, validate_fn=validate
+        key,
+        icon,
+        prefix,
+        entity_category="config",
+        gate_on_presence=True,
+        validate_fn=validate,
+        extra_state_attributes_fn=extra_attributes,
     )
 
 
@@ -363,14 +560,68 @@ def _add_wash_indicator(rep):
     return raw.lower() == "on" if isinstance(raw, str) else None
 
 
+# LaundryOutTime_<minutes> is the app's reminder that a finished load is
+# still in the drum, repeated every 30, 60 or 90 minutes; 0 is off (issue
+# #515). A plain one-token write, measured on a WD91N642OOW and a WW6500.
+# Bound only on those four values: a onebody combo reports LaundryOutTime_158,
+# which is something else.
+_LAUNDRY_OUT_TIMES = ("0", "30", "60", "90")
+
+
+def _laundry_out_time(rep):
+    raw = option_value(rep.get("x.com.samsung.da.options"), "LaundryOutTime")
+    return raw if raw in _LAUNDRY_OUT_TIMES else None
+
+
+def _laundry_out_time_write(p, rep, href=None):
+    if p not in _LAUNDRY_OUT_TIMES:
+        return None
+    return ["course", "vs", "0"], {
+        "x.com.samsung.da.options": option_write("LaundryOutTime", p),
+    }
+
+
+# QuickWash_<Not_Used|Off|On>: Not_Used means the model has no QuickWash at
+# all, the other two whether it is selected. Read-only; nothing writes it,
+# the app included.
+_QUICK_WASH_STATES = ("not_used", "off", "on")
+
+
+def _quick_wash(rep):
+    raw = option_value(rep.get("x.com.samsung.da.options"), "QuickWash")
+    if not isinstance(raw, str):
+        return None
+    state = raw.lower()
+    return state if state in _QUICK_WASH_STATES else None
+
+
+def _washer_course_label(value, resources):
+    """Personal-course name, else raw hex code to avoid cosmetic splitting."""
+    label = washer_cycle_fallback(value, resources)
+    if label is not None:
+        return label
+    if _is_hex(value) and len(value) == 2:
+        return value
+    return None
+
+
 WASHER_COURSE = Capability(
     href="/course/vs/0",
+    # Warm so course and Extra Rinse changes receive Observe push updates.
+    poll_tier="warm",
     entities=(
         cycle_select(
             translation_key="washer_cycle",
             icon="mdi:washing-machine",
             table_href="/st/washercourse/vs/0",
-            display_fn=washer_cycle_fallback,
+            display_fn=_washer_course_label,
+        ),
+        _bool_option_switch(
+            "extra_rinse",
+            "mdi:water-plus",
+            "ExtraRinse",
+            "ExtraRinseSet",
+            supported_options_only=True,
         ),
         SensorDesc(
             key="drum_clean_cycles_remaining",
@@ -476,6 +727,82 @@ WASHER_COURSE = Capability(
             icon="mdi:door-open",
             exists_fn=bool_option_exists("AddWashIndicator"),
             rep_fn=_add_wash_indicator,
+        ),
+        SelectDesc(
+            key="laundry_out_time",
+            icon="mdi:bell-alert-outline",
+            entity_category="config",
+            options=_LAUNDRY_OUT_TIMES,
+            exists_fn=lambda rep, resources: _laundry_out_time(rep) is not None,
+            rep_fn=_laundry_out_time,
+            write_fn=_laundry_out_time_write,
+        ),
+        SensorDesc(
+            key="quick_wash",
+            icon="mdi:timer-fast-outline",
+            device_class="enum",
+            options=_QUICK_WASH_STATES,
+            entity_category="diagnostic",
+            exists_fn=lambda rep, resources: _quick_wash(rep) is not None,
+            rep_fn=_quick_wash,
+        ),
+    ),
+)
+
+
+# supportedProgress is not a fixed list on a washer: it gains Prewash while
+# pre-wash is selected and Delaywash while a delayed start is set (watched
+# on a WW6500's panel), so it is the one place those choices show on boards
+# with no token of their own for them.
+_SUPPORTED_PROGRESS = "x.com.samsung.da.supportedProgress"
+
+
+def _progress_lists(stage):
+    def read(rep):
+        stages = rep.get(_SUPPORTED_PROGRESS)
+        return stage in stages if isinstance(stages, list) else None
+
+    return read
+
+
+def _washes(rep):
+    """A wash cycle's stage list. The microfiber filter sharing this
+    registry reports supportedProgress too, with filter stages only."""
+    stages = rep.get(_SUPPORTED_PROGRESS)
+    return isinstance(stages, list) and "Wash" in stages
+
+
+def _pre_wash_selected_exists(rep, resources):
+    # A board reporting PreWashSetting already has the pre_wash switch.
+    course_rep = resources.get("/course/vs/0") or {}
+    has_switch = option_value(course_rep.get("x.com.samsung.da.options"), "PreWashSetting")
+    return _washes(rep) and has_switch is None
+
+
+def _delay_wash_set_exists(rep, resources):
+    # A board reporting a delay field already shows it on delay_start_hours.
+    has_field = "x.com.samsung.da.delayEndTime" in rep or "x.com.samsung.da.delayStartTime" in rep
+    return _washes(rep) and not has_field
+
+
+# The shared operational state, plus what supportedProgress says about a
+# washer's own options. A dishwasher lists Prewash on every course, so these
+# stay out of the shared capability.
+WASHER_OPERATIONAL_STATE = replace(
+    OPERATIONAL_STATE,
+    entities=(
+        *OPERATIONAL_STATE.entities,
+        BinarySensorDesc(
+            key="pre_wash_selected",
+            icon="mdi:washing-machine",
+            exists_fn=_pre_wash_selected_exists,
+            rep_fn=_progress_lists("Prewash"),
+        ),
+        BinarySensorDesc(
+            key="delay_wash_set",
+            icon="mdi:timer-sand",
+            exists_fn=_delay_wash_set_exists,
+            rep_fn=_progress_lists("Delaywash"),
         ),
     ),
 )

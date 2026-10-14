@@ -47,7 +47,9 @@ IGNORED: list[Capability] = [
     Capability(href="/quickcontrol/info/vs/0"),
     Capability(href="/realtimenotiforclient/vs/0"),
     Capability(href="/file/information/vs/0"),
-    Capability(href="/configuration/vs/0"),  # region/countryCode
+    # Normally static region/countryCode metadata. The range, oven and
+    # microwave registries replace this entry with the write-only clock button.
+    Capability(href="/configuration/vs/0"),
     Capability(href="/setting/vs/0"),  # supported/selected UI language
     Capability(href="/timezone/vs/0"),  # redundant with HA's own timezone
     Capability(href="/wm/setinfo/vs/0"),  # model/manufacturing metadata
@@ -55,6 +57,11 @@ IGNORED: list[Capability] = [
     # milliseconds, issue #165's TP1X_REF_21K fridge) -- internal transport
     # plumbing, not appliance state.
     Capability(href="/rm/control/vs/0"),
+    # Its raw-data sibling: a fixed telemetry descriptor for the drum
+    # sensing/RPM control trace ("WMFrameMems"), identical on every laundry
+    # board that reports it (issue #437). Collection config for Samsung's
+    # own diagnostics, not appliance state.
+    Capability(href="/rm/framemems/vs/0"),
     # Demand Response Load Control — utility-company grid signals; requires
     # cloud registration with a utility program we don't support locally.
     Capability(href="/drlc/vs/0"),
@@ -71,8 +78,6 @@ IGNORED: list[Capability] = [
     Capability(href="/sec/networkaudio/audio/vs/0"),
     # Static Bespoke-product-line flag, not appliance state.
     Capability(href="/bespoke/vs/0"),
-    # Empty resource on every dump seen so far — nothing to expose.
-    Capability(href="/defrost/prediction/vs/0"),
     # Seasonal defrost schedule (start/period/end per season). Automating
     # this cleanly would need a multi-field schedule editor; the practical
     # on/off control is fridge.DEFROST_DELAY.
@@ -90,13 +95,19 @@ IGNORED: list[Capability] = [
     # Demand-response energy planner — same utility-program dependency as
     # /drlc/vs/0 above; every dump seen so far is inert (plan: 'none').
     Capability(href="/energy/planner/vs/0"),
+    # OpenADR demand response (AHRI 1380, issue #569) -- same
+    # utility-program dependency as /drlc/vs/0 above; status Idle on the dump.
+    Capability(href="/oadr/vs/0"),
     # Temperature-unit display preference, redundant with HA's own units.
     Capability(href="/wm/submode/vs/0"),
     # Read-only re-encoding of the course already exposed by
     # washer.WASHER_COURSE at /course/vs/0 (same hex code, just prefixed
     # "Table_02_Course_").
+    #
+    # Course tables arrive in the initial device batch, so discovery has them
+    # before Home Assistant registers the cycle select's translated states.
     Capability(href="/st/washercourse/vs/0"),
-    # Dryer counterpart: re-encodes dryer.DRYER_COURSE's /course/vs/0.
+    # Dryer counterpart: its courseTable supplies dryer_cycle's translated states.
     Capability(href="/st/dryercourse/vs/0"),
     # AirDresser counterpart (issue #157): read only for its courseTable id
     # (air_dresser.AIR_DRESSER_COURSE's table_href), no entity of its own.
@@ -106,11 +117,20 @@ IGNORED: list[Capability] = [
     # User-saved custom course slots (F1-FA). No controllable/observable
     # state without a multi-slot editor; revisit if that becomes valuable.
     Capability(href="/wm/personalcourse/vs/0"),
+    # Control-panel entry/user mode. Reads like a demo/showroom-mode
+    # indicator, but every dump carrying it (issues #241, #437, #438)
+    # reports detailUserMode USERMODE_NORMAL and nonUsermodeOperationState
+    # Ready -- no second value to interpret against, so there is nothing to
+    # expose yet. Revisit if a dump ever shows a non-normal mode.
+    Capability(href="/wm/displaymode/state/vs/0"),
     # OCF-native energy resource is empty ({}) on washer hardware seen so
     # far -- common.ENERGY_METER on /energy/consumption/vs/0 is the only
     # real source.
     Capability(href="/energy/consumption/0"),
-    # Empty ({}) on every washer dump seen so far -- nothing to expose.
+    # Empty ({}) on washers; dryers and air dressers report a lone
+    # cycleInterfaceEnabled flag (issue #438). Either way it gates
+    # SmartThings' own cycle-interface protocol rather than anything the
+    # appliance does.
     Capability(href="/cycleinterface/vs/0"),
     # OCF-native duplicate of /drlc/vs/0 above -- same utility-program
     # dependency this integration doesn't support locally.
@@ -125,3 +145,9 @@ IGNORED: list[Capability] = [
     # treatment as the microwave family's /recipe/cook/vs/0.
     Capability(href="/cooktop/recipe/status/vs/0"),
 ]
+
+
+def without(*hrefs: str) -> tuple[Capability, ...]:
+    """Return the ignored capabilities except for the supplied hrefs."""
+    excluded = set(hrefs)
+    return tuple(capability for capability in IGNORED if capability.href not in excluded)

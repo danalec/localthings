@@ -2,20 +2,11 @@
 from PR #316 (Samsung "System Fresh Air Ventilator", model
 ACA-KR-TP2-21-AN9000, vid DA-AC-DIFFUSER-01001).
 
-No raw diagnostics dump for this model was available -- PR #316 never
-attached one, only Korean code comments describing field shapes the
-contributor said they observed. Per this project's fixture-integrity rule
-(a fixture must record what hardware actually did, not a third party's
-prose about it), there's no `airconditioner_*_device.json` fixture for
-this model here. These tests instead exercise the gating logic directly
-against hand-built reps matching those quoted shapes, clearly distinct
-from this suite's fixture-backed tests, and check the new gate doesn't
-false-positive against every real AC fixture already in the corpus.
-
-If a real diagnostics dump for this model ever surfaces (tracked as a
-follow-up device-support issue), replace this file with a proper
-fixture + golden + capability test per the usual workflow, and drop the
-disclaimer above.
+These tests exercise the gating logic against hand-built reps in the
+shapes PR #316 described, and check the gate doesn't false-positive on any
+real AC fixture. The real dump (issue #522) is
+`airconditioner_aca_kr_tp2_21_an9000`, covered with its golden in
+test_airconditioner_aca_kr_tp2_21_an9000.py.
 """
 
 import glob
@@ -50,12 +41,17 @@ def _all_airconditioner_fixture_names():
     return names
 
 
+# Ventilators that route to the AC registry and are meant to get the select.
+_VENTILATOR_FIXTURES = frozenset(("airconditioner_tp1x_rhs",))
+
+
 def test_ventilation_mode_gate_never_false_positives_on_real_ac_fixtures():
-    """None of the real air-conditioner fixtures in this corpus use the
-    Purification/Ventilation/SmartVentilation vocabulary -- confirms
-    _is_ventilation_mode_device can't turn a real AC's climate card into
-    this select."""
+    """None of the real air-conditioner fixtures in this corpus use a
+    ventilator's mode vocabulary -- confirms _is_ventilation_mode_device
+    can't turn a real AC's climate card into this select."""
     for name in _all_airconditioner_fixture_names():
+        if name in _VENTILATOR_FIXTURES:
+            continue
         resources = _load_device(name)
         reg = for_device_by_model(
             resources["/information/vs/0"]["x.com.samsung.da.modelNum"],
@@ -78,6 +74,13 @@ def test_ventilation_mode_gate_matches_diffuser_shape():
         "x.com.samsung.da.supportedModes": ["Purification", "Ventilation", "SmartVentilation"],
     }
     assert _is_ventilation_mode_device(rep, {}) is True
+
+
+def test_ventilation_mode_gate_does_not_accept_ai_comfort_alone():
+    """AIComfort is allowed next to ventilator modes (issue #551) because real
+    ACs list it too -- so it must never be enough on its own."""
+    rep = {"x.com.samsung.da.supportedModes": ["AIComfort"]}
+    assert _is_ventilation_mode_device(rep, {}) is False
 
 
 def test_ventilation_mode_gate_rejects_partial_overlap():

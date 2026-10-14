@@ -10,6 +10,7 @@ from smartthings_local.ocf.state_cache import StateCache
 
 from custom_components.localthings.observe import (
     MODE_POLL,
+    STALE_SWEEPS_TO_FALLBACK,
     ObserveManager,
     _rep_diff,
 )
@@ -56,6 +57,58 @@ def test_apply_merges_partial_update_onto_prior_rep():
     assert cached is not None
     assert cached["x.com.samsung.da.modes"] == ["CVN_CONVERTIBLE_ZONE", "WATERFILTER_ENABLE"]
     assert cached["x.com.samsung.da.supportedOptions"] == ["CV_FDR_WINE", "CV_FDR_MEAT"]
+
+
+_WASHER_OPTIONS = [
+    "Course_1B",
+    "AvailableDelayTime_87",
+    "DetergentLevelCtrl_2",
+    "SoftenerLevelCtrl_2",
+    "BubbleSoak_Off",
+    "DrumCleanLog_2026-09-30T10:00:00",
+]
+
+
+def test_observe_notify_merges_partial_options_by_prefix():
+    """Issue #579: on a dial change a washer's /course/vs/0 notify carries
+    only the tokens that changed. Replacing the cached array with it wiped
+    Course_ and every sibling setting until the next sweep."""
+    mgr = _manager()
+    mgr.apply("/course/vs/0", {"x.com.samsung.da.options": list(_WASHER_OPTIONS)}, source="poll")
+
+    mgr.apply(
+        "/course/vs/0", {"x.com.samsung.da.options": ["AvailableDelayTime_25"]}, source="observe"
+    )
+    mgr.apply("/course/vs/0", {"x.com.samsung.da.options": ["Course_1E"]}, source="observe")
+
+    cached = mgr.cache.get("/course/vs/0")
+    assert cached is not None
+    options = cached["x.com.samsung.da.options"]
+    assert options == [
+        "Course_1E",
+        "AvailableDelayTime_25",
+        "DetergentLevelCtrl_2",
+        "SoftenerLevelCtrl_2",
+        "BubbleSoak_Off",
+        "DrumCleanLog_2026-09-30T10:00:00",
+    ]
+
+
+def test_poll_still_replaces_the_whole_options_array():
+    """A poll or sweep reads the complete array, so a token the device has
+    dropped (one the new course doesn't support) must go with it."""
+    mgr = _manager()
+    mgr.apply("/course/vs/0", {"x.com.samsung.da.options": list(_WASHER_OPTIONS)}, source="poll")
+
+    mgr.apply(
+        "/course/vs/0",
+        {"x.com.samsung.da.options": ["Course_22", "SoftenerLevelCtrl_2"]},
+        source="poll",
+    )
+
+    cached = mgr.cache.get("/course/vs/0")
+    assert cached is not None
+    assert cached["x.com.samsung.da.options"] == ["Course_22", "SoftenerLevelCtrl_2"]
 
 
 def test_apply_fully_replaces_alarms_href_instead_of_merging():
@@ -134,6 +187,40 @@ def test_apply_optimistic_bypasses_an_in_progress_settle_window():
     # gated -- the second write's own guard (re-armed by mark_write_pending,
     # not exercised directly here) is what protects it going forward.
     assert mgr.apply("/course/vs/0", {"Detergent": "1"}, source="poll") is False
+
+
+def test_a_refused_write_keeps_an_earlier_writes_settle_window():
+    mgr = _manager()
+    mgr.cache.apply_rep("/oven/vs/0", {"a": 1}, source="seed")
+    mgr.mark_write_pending("/oven/vs/0", settle_s=30.0)
+    previous = mgr.settle_deadline("/oven/vs/0")
+    armed = mgr.mark_write_pending("/oven/vs/0", settle_s=30.0)
+
+    mgr.restore_write_pending("/oven/vs/0", previous, armed)
+
+    assert mgr.settle_deadline("/oven/vs/0") == previous
+
+
+def test_a_refused_write_alone_ends_its_settle_window():
+    mgr = _manager()
+    mgr.cache.apply_rep("/oven/vs/0", {"a": 1}, source="seed")
+    armed = mgr.mark_write_pending("/oven/vs/0", settle_s=30.0)
+
+    mgr.restore_write_pending("/oven/vs/0", None, armed)
+
+    assert mgr.apply("/oven/vs/0", {"a": 2}, source="poll") is True
+
+
+def test_a_refused_write_leaves_a_newer_writes_settle_window():
+    """Two writes queued on one href: the first is refused after the second
+    armed its window, which must survive."""
+    mgr = _manager()
+    first = mgr.mark_write_pending("/oven/vs/0", settle_s=30.0)
+    second = mgr.mark_write_pending("/oven/vs/0", settle_s=31.0)
+
+    mgr.restore_write_pending("/oven/vs/0", None, first)
+
+    assert mgr.settle_deadline("/oven/vs/0") == second
 
 
 def test_apply_accepts_update_after_settle_window_elapses():
@@ -290,25 +377,6 @@ def test_on_notification_ignores_malformed_cbor():
     assert mgr.cache.get("/oven/vs/0") is None
 
 
-def test_recently_notified_false_before_any_notify():
-    mgr = _manager()
-    assert mgr.recently_notified() is False
-
-
-def test_recently_notified_true_just_after_a_notify():
-    mgr = _manager()
-    mgr.on_notification("/oven/vs/0", cbor2.dumps({"a": 1}))
-    assert mgr.recently_notified() is True
-
-
-def test_recently_notified_false_after_window_elapses():
-    mgr = _manager()
-    mgr.on_notification("/oven/vs/0", cbor2.dumps({"a": 1}))
-    assert mgr.recently_notified(window_s=0.01) is True
-    time.sleep(0.02)
-    assert mgr.recently_notified(window_s=0.01) is False
-
-
 def test_try_enter_observe_mode_clears_stale_notifications_on_retry():
     """Regression test: verify second call to try_enter_observe_mode() doesn't
     get polluted by notifications from the first call. This happens in real
@@ -387,6 +455,74 @@ def test_log_sweep_discrepancies_never_changes_mode():
         mgr.log_sweep_discrepancies({hrefs[0]: {"a": 2}, hrefs[1]: {"a": 2}})
 
         assert mgr.mode == "observe"
+    finally:
+        mgr.close()
+
+
+def _observing(mgr: ObserveManager, hrefs: list[str]) -> None:
+    """Enter observe mode with every href having pushed once."""
+    for href in hrefs:
+        mgr.on_notification(href, cbor2.dumps({"t": 0}))
+    mgr.enter_observe_mode(_FakeSession(), set(hrefs))
+    assert mgr.fallback_hrefs == set()
+
+
+def _sweep(mgr: ObserveManager, resources: dict[str, dict]) -> None:
+    """What the coordinator does with each sweep: compare, then apply."""
+    mgr.log_sweep_discrepancies(resources)
+    for href, rep in resources.items():
+        mgr.apply(href, rep, source="sweep")
+
+
+def test_href_the_sweep_keeps_finding_stale_goes_back_on_fallback():
+    """Issue #507: a range's /temperatures/vs/0 pushes once, then climbs
+    through a preheat without another notify. Once the sweep has found it
+    stale enough times in a row, it is sub-polled again like an href that
+    never pushed (issue #92)."""
+    mgr = _manager()
+    href = "/temperatures/vs/0"
+    _observing(mgr, [href, "/power/vs/0"])
+    try:
+        for t in range(1, STALE_SWEEPS_TO_FALLBACK):
+            _sweep(mgr, {href: {"t": t}, "/power/vs/0": {"t": 0}})
+            assert mgr.fallback_hrefs == set()
+        _sweep(mgr, {href: {"t": STALE_SWEEPS_TO_FALLBACK}, "/power/vs/0": {"t": 0}})
+        assert mgr.fallback_hrefs == {href}
+        assert mgr.mode == "observe"
+    finally:
+        mgr.close()
+
+
+def test_a_fresh_sweep_resets_the_stale_count():
+    """Only consecutive stale sweeps count, so an href that misses one
+    change now and then stays push-covered."""
+    mgr = _manager()
+    href = "/temperatures/vs/0"
+    _observing(mgr, [href])
+    try:
+        for t in range(1, STALE_SWEEPS_TO_FALLBACK * 2):
+            _sweep(mgr, {href: {"t": t}})
+            _sweep(mgr, {href: {"t": t}})
+        assert mgr.fallback_hrefs == set()
+    finally:
+        mgr.close()
+
+
+def test_a_notify_takes_a_stale_href_back_off_fallback():
+    mgr = _manager()
+    href = "/temperatures/vs/0"
+    _observing(mgr, [href])
+    try:
+        for t in range(1, STALE_SWEEPS_TO_FALLBACK + 1):
+            _sweep(mgr, {href: {"t": t}})
+        assert mgr.fallback_hrefs == {href}
+
+        mgr.on_notification(href, cbor2.dumps({"t": 99}))
+        assert mgr.fallback_hrefs == set()
+        # The count restarted with the notify, so one stale sweep is not
+        # enough to demote it again.
+        _sweep(mgr, {href: {"t": 100}})
+        assert mgr.fallback_hrefs == set()
     finally:
         mgr.close()
 
@@ -609,3 +745,46 @@ def test_try_enter_observe_mode_waits_full_ceiling_when_fraction_not_reached():
         assert elapsed >= 0.18
     finally:
         mgr.close()
+
+
+def test_on_notification_drops_rep_whose_rt_names_another_resource():
+    """Issue #509: a /wind/direction/vs/0 rep filed under /mode/vs/0 (a
+    shared Observe token) must not overwrite the mode rep, nor count as
+    /mode/vs/0 having pushed."""
+    mgr = _manager()
+    mode = {
+        "x.com.samsung.da.modes": ["Cool"],
+        "x.com.samsung.da.supportedModes": ["Auto", "Cool", "Dry", "Fan", "Heat"],
+        "rt": ["x.com.samsung.da.mode"],
+    }
+    mgr.apply("/mode/vs/0", mode, source="poll")
+    mgr.fallback_hrefs = {"/mode/vs/0"}
+
+    wind = {
+        "x.com.samsung.da.modes": "Fix",
+        "x.com.samsung.da.supportedModes": ["Up_And_Low", "Fix", "Individual"],
+        "rt": ["x.com.samsung.da.wind.direction"],
+    }
+    mgr.on_notification("/mode/vs/0", cbor2.dumps(wind))
+
+    assert mgr.cache.get("/mode/vs/0") == mode
+    assert mgr.fallback_hrefs == {"/mode/vs/0"}
+    assert "/mode/vs/0" not in mgr._notified
+
+
+def test_on_notification_applies_rep_when_rt_matches_or_is_absent():
+    mgr = _manager()
+    mgr.apply(
+        "/mode/vs/0",
+        {"x.com.samsung.da.modes": ["Cool"], "rt": ["x.com.samsung.da.mode"]},
+        source="poll",
+    )
+
+    mgr.on_notification(
+        "/mode/vs/0",
+        cbor2.dumps({"x.com.samsung.da.modes": ["Heat"], "rt": ["x.com.samsung.da.mode"]}),
+    )
+    assert (mgr.cache.get("/mode/vs/0") or {}).get("x.com.samsung.da.modes") == ["Heat"]
+
+    mgr.on_notification("/mode/vs/0", cbor2.dumps({"x.com.samsung.da.modes": ["Dry"]}))
+    assert (mgr.cache.get("/mode/vs/0") or {}).get("x.com.samsung.da.modes") == ["Dry"]

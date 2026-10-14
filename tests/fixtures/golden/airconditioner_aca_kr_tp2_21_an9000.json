@@ -1,0 +1,32 @@
+{
+  "state_keys": [
+    "air_filter_status",
+    "air_filter_usage",
+    "air_filter_usage_hours",
+    "air_sensing_state",
+    "alarm_code",
+    "beep",
+    "clean_level",
+    "climate",
+    "co2",
+    "device_active",
+    "dust",
+    "fine_dust",
+    "hepa_filter_status",
+    "hepa_filter_usage",
+    "humidity",
+    "last_air_sensing_level",
+    "last_air_sensing_time",
+    "odor",
+    "periodic_air_sensing",
+    "periodic_sensing_skip_status",
+    "sensing_interval",
+    "sensing_mode",
+    "sensing_skip_end",
+    "sensing_skip_start",
+    "super_fine_dust",
+    "ventilation_mode",
+    "windfree",
+    "windsleep"
+  ]
+}

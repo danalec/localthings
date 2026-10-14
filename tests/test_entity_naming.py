@@ -1,6 +1,6 @@
 """Tests for translated entity naming and dynamic instance placeholders."""
 
-from typing import cast
+from typing import ClassVar, cast
 
 from custom_components.localthings.coordinator import LocalThingsCoordinator
 from custom_components.localthings.entity import LocalThingsEntity
@@ -11,6 +11,7 @@ from custom_components.localthings.registry.entities import BinarySensorDesc
 
 class _FakeCoordinator:
     device_key = "TEST-SERIAL"
+    instance_names: ClassVar[dict] = {}
 
     def __init__(self, last_resources=None):
         self.last_resources = last_resources or {}

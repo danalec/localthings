@@ -399,6 +399,45 @@ no `[%key:...%]` resolution (that's Core build tooling). Every other language
 must mirror `en.json` key for key — also enforced by
 `tests/test_translations.py`.
 
+### Look for English that Python builds
+
+The catalog only covers what it owns. Anything Python puts in front of the
+user is untranslated unless it goes through the catalog, so check a new
+device for:
+
+- **`{instance_name}` values.** Entities with `use_instance_name=True` get
+  their compartment or ice-maker name from the href/key (`Door Cvroom`) or
+  from a device name field (`CUBED_ICE` → `Cubed Ice`). Each one needs an
+  entry under `selector.instance_name.options.<slug>`, where the slug is the
+  derived name lowercased with spaces as underscores (`door_cvroom`). hassfest
+  rejects an unknown top-level section, which is why this table sits under
+  `selector`. `test_every_fixture_instance_name_has_a_catalog_entry` fails on
+  a new fixture's name until it's added (issue #533).
+
+  Write the value as what a person would call the part, not a tidied-up href:
+  `door_cvroom` is "Flex zone door", `door_cooler` is "Fridge door" (Samsung's
+  "cooler" is the fridge compartment). Read it inside every template it
+  fills ("Flex zone door open", "Top compartment storage mode") before
+  settling on it. Name what the part is, not what the href says it is: the
+  RR40M7165WW fridge reports `/door/onedoorfreezer`, so single-door units get
+  a neutral "Main door".
+
+  Instance templates start with `{instance_name}` in every language
+  (`test_instance_name_templates_lead_with_the_placeholder`), so a value is a
+  capitalized noun phrase with no article. Where a template's adjective has
+  to agree with the noun (Spanish "abierta", Italian "aperto"), pick that
+  language's values so they share one gender, or give the template a
+  separator (`{instance_name} — otwarte`).
+- **Other `translation_placeholders` values.** A number or an href is fine as
+  is; a word or phrase needs the same treatment as above.
+- **Fallback labels.** A `display_fn` or similar that turns a raw value into
+  English prose is a missing catalog entry. A device-supplied name (a
+  personal course, an open-ended vendor string) is fine to show as is.
+
+When you add an entry, fill in all languages with a real translation, reusing
+the wording that language already uses for the same thing elsewhere in its
+file (e.g. its "Freezer temperature" for "Freezer").
+
 **Don't write a test that just re-asserts a translation string.** Adding
 labels is a data change, not a logic change, and `tests/test_translations.py`
 already holds the invariants that matter for data (every descriptor has a

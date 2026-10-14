@@ -376,6 +376,105 @@ def test_confirmed_dryer_table_03_dv19t8745bv_course_names():
         assert d_states["3d"] == w_states["66"], language  # Denim
 
 
+def test_confirmed_ww6500_table_00_course_names():
+    """A WW6500 owner (DA_WM_A51_20_COMMON) read all fourteen of their
+    Table_00 courses out of the SmartThings app, none of which had a label
+    before -- 5B-6B, disjoint from the 01/55-78 an earlier Table_00 device
+    contributed.
+
+    Twelve reuse an existing string, each pinned to its washer_cycle_table_02
+    twin: only 5E, 64 and 66 have one inside Table_00 itself (75, 73, 71).
+    Pinned in every locale, not English alone -- a locale that worded one
+    differently from the code it shares a meaning with would still pass the
+    key-topology test, the gap issue #343 fell through. Only 5C and 61 are
+    new wording, and the app calls 5C "Extra rychlý" rather than the "Super
+    rychlé" it uses for Table_02's 1D, so the two deliberately do NOT share
+    a label.
+    """
+    shared = {
+        "5b": "1b",  # Cotton
+        "5d": "03",  # Super Eco Wash
+        "5e": "26",  # Delicates
+        "5f": "0c",  # Baby Care
+        "60": "07",  # Outdoor
+        "63": "09",  # Drum Clean
+        "64": "78",  # Rinse + Spin
+        "65": "22",  # Wool
+        "66": "06",  # Bedding
+        "67": "25",  # Synthetics
+        "68": "35",  # E Cotton
+        "6b": "0d",  # Spin Only
+    }
+    for language in _languages():
+        select = _load(language)["entity"]["select"]
+        t00 = select["washer_cycle_table_00"]["state"]
+        t02 = select["washer_cycle_table_02"]["state"]
+        for code, twin in shared.items():
+            assert t00[code] == t02[twin], (language, code, twin)
+        # Distinct cycle, distinct wording -- not the Table_02 Super Speed.
+        assert t00["5c"] != t02["1d"], language
+
+    english = _load("en")["entity"]["select"]["washer_cycle_table_00"]["state"]
+    assert {code: english[code] for code in ("5c", "61")} == {
+        "5c": "Extra Speed",
+        "61": "Dark Garment",
+    }
+    assert _load("cs")["entity"]["select"]["washer_cycle_table_00"]["state"]["5c"] == (
+        "Extra rychlý"
+    )
+
+
+def test_confirmed_dryer_dry_level_labels():
+    """dryer_dry_level's word vocabulary (None/Damp/Less/Normal/More/Very),
+    confirmed across the TP1_21 dryer fixtures. The numeric vocabulary
+    (None/1/2/3) that DV6800N reports is deliberately NOT translated -- no
+    confirmed meaning for the digits exists, and select._display renders an
+    uncatalogued value raw rather than guessing a label for it."""
+    states = _load("en")["entity"]["select"]["dryer_dry_level"]["state"]
+    assert set(states) == {"none", "damp", "less", "normal", "more", "very"}
+    assert states["none"] == "Off"
+    for digit in ("1", "2", "3"):
+        assert digit not in states
+
+
+def test_confirmed_ww7800m_table_00_d_family_course_names():
+    """A WW7800M owner (DA_WM_A51_20_COMMON, the same controller as #409's
+    WW6500) read all fourteen of their Table_00 courses off the appliance's
+    own option list and panel -- the D-family, disjoint from both slices the
+    table already carried, so every option rendered as raw hex (issue #489).
+
+    Thirteen reuse an existing string, pinned here to the twin they reuse so
+    a locale can't reword one half of a shared meaning -- the #343 gap the
+    #409 test above covers the same way. DB ('Super rapide') takes the
+    *washer* Super Speed, not the dryer's identically-coded DB: Korean words
+    that one as quick *drying*. Only E4 is new wording.
+    """
+    shared = {
+        "ba": ("washer_cycle_table_02", "28"),  # Drain/Spin
+        "d0": ("washer_cycle_table_00", "5b"),  # Cotton
+        "d1": ("washer_cycle_table_00", "68"),  # E Cotton
+        "d2": ("washer_cycle_table_00", "67"),  # Synthetics
+        "d3": ("washer_cycle_table_00", "5e"),  # Delicates
+        "d4": ("washer_cycle_table_00", "64"),  # Rinse + Spin
+        "d5": ("washer_cycle_table_00", "63"),  # Drum Clean
+        "d6": ("washer_cycle_table_00", "66"),  # Bedding
+        "d7": ("dryer_cycle_table_00", "d7"),  # Outdoor Care
+        "d8": ("washer_cycle_table_00", "65"),  # Wool
+        "da": ("washer_cycle_table_00", "5d"),  # Super Eco Wash
+        "db": ("washer_cycle_table_02", "1d"),  # Super Speed
+        "dc": ("washer_cycle_table_02", "1e"),  # 15' Quick Wash
+    }
+    for language in _languages():
+        select = _load(language)["entity"]["select"]
+        t00 = select["washer_cycle_table_00"]["state"]
+        for code, (table, twin) in shared.items():
+            assert t00[code] == select[table]["state"][twin], (language, code, twin)
+        assert t00["e4"], language
+
+    english = _load("en")["entity"]["select"]["washer_cycle_table_00"]["state"]
+    assert english["e4"] == "Anti Allergen"
+
+
 def test_reported_washer_standard_courses_all_have_table_02_labels():
     """Every non-personal code in the reported washer's live course list
     must resolve through the Table_02 catalog instead of appearing as raw
@@ -660,3 +759,48 @@ def test_every_kimchi_zone_supportmode_code_has_a_state_label():
                 if code.lower() not in state_labels
             )
     assert missing == []
+
+
+def test_every_fixture_instance_name_has_a_catalog_entry():
+    """Every {instance_name} a captured device produces is translatable
+    (issue #533). A new compartment or ice-maker name fails here until it is
+    added to ``selector.instance_name.options``; the mirror test above then
+    requires it in every language.
+    """
+    from custom_components.localthings.entity import _instance_display_name
+    from custom_components.localthings.registry.adapter import _key
+    from custom_components.localthings.registry.batch import parse_device0_batch
+    from custom_components.localthings.registry.by_type import resolve
+    from custom_components.localthings.registry.discovery import discover
+
+    table = _load("en")["selector"]["instance_name"]["options"]
+    missing = {}
+    for fixture in sorted((Path(__file__).parent / "fixtures").glob("*_device.json")):
+        resources = parse_device0_batch(json.loads(fixture.read_text())["device0"])
+        registry = resolve(resources)
+        if registry is None:
+            continue
+        for bound in discover(resources, registry.capabilities, registry.pattern_capabilities):
+            if not bound.desc.use_instance_name:
+                continue
+            name = _instance_display_name(bound, _key(bound))
+            if name.lower().replace(" ", "_") not in table:
+                missing[name] = fixture.name
+    assert missing == {}
+
+
+def test_instance_name_templates_lead_with_the_placeholder():
+    """Instance names are written as capitalized noun phrases with no
+    article or case ending, which only reads right at the start of a name
+    (issue #533)."""
+    keys = {
+        (PLATFORM_OF[type(desc)], desc.translation_key or desc.key)
+        for desc in _all_descriptions()
+        if desc.use_instance_name
+    }
+    assert keys
+    for language in _languages():
+        entity = _load(language)["entity"]
+        for platform, key in keys:
+            name = entity[platform][key]["name"]
+            assert name.startswith("{instance_name}"), (language, platform, key, name)

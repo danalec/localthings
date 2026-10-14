@@ -1,3 +1,53 @@
+start_cooking:
+  name: Start cooking
+  description: >-
+    Start an oven, range or microwave cooking. Only modes the appliance
+    itself says a remote may start can be used, with its own temperature
+    and time limits for that mode. Remote Control has to be on at the
+    appliance, and it has to be idle. Leave every field empty to start what
+    the mode, setpoint and cook-time entities are holding; otherwise
+    anything left out uses the mode's own default.
+  fields:
+    device_id:
+      name: Device
+      description: The oven, range or microwave to start.
+      required: true
+      selector:
+        device:
+          integration: localthings
+    mode:
+      name: Mode
+      description: >-
+        The cooking mode, as the appliance names it (for example Bake or
+        ConvectionBake). Defaults to the appliance's own default mode.
+      required: false
+      example: Bake
+      selector:
+        text:
+    temperature:
+      name: Temperature
+      description: >-
+        In Home Assistant's temperature unit. Rounded to the mode's step.
+        Defaults to the mode's own default. Leave it out for a mode with no
+        temperature.
+      required: false
+      example: 180
+      selector:
+        number:
+          min: 0
+          max: 600
+          step: 1
+          mode: box
+    duration:
+      name: Cook time
+      description: >-
+        How long to cook, including preheat. Defaults to the mode's own
+        default.
+      required: false
+      example: "00:30:00"
+      selector:
+        duration:
+
 write_resource:
   name: Write resource
   description: >-
@@ -23,9 +73,19 @@ write_resource:
       description: >-
         1-10 writes to perform in order. Each item needs href (the
         canonical resource, e.g. /mode/vs/0) and payload (a non-empty
-        object sent verbatim as a partial-rep POST); settle is how many
+        object sent verbatim as a partial-rep POST, or a list of
+        {href, rep} elements sent verbatim as an OCF Collection batch --
+        the shape /device/0 answers on a read, and the one measured to
+        start an oven cook; an element may omit rep, and a batch's inner
+        hrefs are never rewritten, not even for a subdevice); settle is how many
         seconds to wait after that write before starting the next one
-        (0-30, default 0).
+        (0-30, default 0); readback (default true) is whether to read the
+        resource straight back for the "after"/"changed" fields. Set it
+        false on a board where a write is accepted and then reverted --
+        on some firmware that immediate GET is itself what triggers the
+        revert, so leaving it on makes the readback part of the
+        experiment. Without it "changed" comes back null and verify_after
+        is the only check.
       required: true
       example: >-
         [{"href": "/mode/vs/0", "payload": {"x.com.samsung.da.modes":
@@ -80,9 +140,50 @@ read_resource:
     href:
       name: Resource href
       description: >-
-        Canonical resource href to read (e.g. /mode/vs/0). Omit to get the
-        cached snapshot of every tracked resource instead of a live GET.
+        Canonical resource href to read (e.g. /mode/vs/0). Add a query
+        after ? to send it with the GET, e.g. /device/1?if=oic.if.b, with
+        & between parameters. Omit to get the cached snapshot of every
+        tracked resource instead of a live GET.
       required: false
-      example: /mode/vs/0
+      example: /device/1?if=oic.if.b
       selector:
         text:
+
+observe_resource:
+  name: Observe resource
+  description: >-
+    Subscribe to one of a device's OCF resources with CoAP OBSERVE for a
+    while, and return every notification it pushed alongside a plain GET of
+    the same resource. For finding fields a device only sends in
+    notifications, not day-to-day use. Polling and writes carry on while it
+    listens. Not available on appliances on TCP 8888.
+  fields:
+    device_id:
+      name: Device
+      description: The appliance to observe, or one of its subdevices.
+      required: true
+      selector:
+        device:
+          integration: localthings
+    href:
+      name: Resource href
+      description: >-
+        Canonical resource href to observe (e.g. /energy/consumption/vs/0).
+        Add a query after ? to send it with the subscription, as with Read
+        resource.
+      required: true
+      example: /energy/consumption/vs/0
+      selector:
+        text:
+    duration:
+      name: Duration
+      description: How many seconds to listen for, up to 120.
+      required: false
+      default: 30
+      selector:
+        number:
+          min: 1
+          max: 120
+          step: 1
+          unit_of_measurement: seconds
+          mode: box

@@ -3,12 +3,15 @@
 from __future__ import annotations
 
 import json
+from inspect import signature
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
 import cbor2
 import pytest
+from homeassistant.core import HomeAssistant
+from homeassistant.helpers import device_registry as dr
 from pytest_homeassistant_custom_component.common import MockConfigEntry
 
 from custom_components.localthings.const import (
@@ -88,6 +91,10 @@ MOCK_SERIAL = "TEST-SERIAL-0000"
 # fails rather than passing by coincidence.
 MOCK_DEVICE_KEY = "7b1f0c9e-2a44-4d6b-9f10-4c8e2b5a0d31"
 MOCK_MODEL = "TEST-MODEL"
+# The WiFi MAC the probe reads off /wirelessinfo/vs/0 (issue #469).
+# Matches the refrigerator fixture's scrubbed address, so an entry built
+# from a probe result and one built from a poll of that fixture agree.
+MOCK_MAC = "aa:bb:cc:00:02:01"
 MOCK_DEVICE_TYPE = "refrigerator"
 MOCK_CA_CERT_PEM = "-----BEGIN CERTIFICATE-----\nTEST-CA\n-----END CERTIFICATE-----"
 MOCK_CA_KEY_PEM = "-----BEGIN PRIVATE KEY-----\nTEST-CA-KEY\n-----END PRIVATE KEY-----"
@@ -122,6 +129,33 @@ LEGACY_ENTRY_DATA = {
 }
 
 
+def entry_has_identifier(
+    hass: HomeAssistant, entry: MockConfigEntry, identifier: tuple[str, str]
+) -> bool:
+    """True if any device row belonging to `entry` carries `identifier`.
+
+    Not `dev_reg.async_get_device`, which HA 2026.9 deprecates (removed in
+    2027.8) because identifiers are no longer unique across config entries --
+    and one entry's own rows are what these assertions mean anyway.
+    """
+    return any(
+        identifier in row.identifiers
+        for row in dr.async_entries_for_config_entry(dr.async_get(hass), entry.entry_id)
+    )
+
+
+def link_to_parent(parent: dr.DeviceEntry) -> dict[str, Any]:
+    """`async_get_or_create` kwargs linking a new row under `parent`.
+
+    HA 2026.9 replaced `via_device` (an identifier) with `via_device_id` (a
+    device id) and errors on the old one; cores back to this integration's
+    2025.1 floor accept only `via_device`. Both store the same link.
+    """
+    if "via_device_id" in signature(dr.DeviceRegistry.async_get_or_create).parameters:
+        return {"via_device_id": parent.id}
+    return {"via_device": next(iter(parent.identifiers))}
+
+
 def _load_fridge_resources() -> dict:
     from custom_components.localthings.registry.batch import parse_device0_batch
 
@@ -138,6 +172,10 @@ def _probe_result(*, recognized: bool) -> dict:
     return {
         "port": MOCK_PORT,
         "device_key": MOCK_DEVICE_KEY,
+        # A device that reports a usable `di` resolves both from it, so the
+        # realistic fake has them agree; the cases where they diverge get
+        # their own tests.
+        "ocf_device_id": MOCK_DEVICE_KEY,
         "serial": MOCK_SERIAL,
         "model": MOCK_MODEL,
         "manufacturer": "Samsung",
@@ -145,6 +183,7 @@ def _probe_result(*, recognized: bool) -> dict:
         "device_type_recognized": recognized,
         "leaf_cert_pem": MOCK_LEAF_CERT_PEM,
         "leaf_key_pem": MOCK_LEAF_KEY_PEM,
+        "mac": MOCK_MAC,
     }
 
 
@@ -183,12 +222,16 @@ def mock_coordinator_session(fridge_resources):
 
 
 class FakeObserveSession:
-    """Stand-in for DtlsCoapSession that supports subscribe()/on_notification
+    """Stand-in for a Transport that supports subscribe()/on_notification
     for coordinator-level observe tests, without a real DTLS connection."""
+
+    # The Transport protocol requires it; observe attempts are gated on it.
+    supports_observe = True
 
     def __init__(self, on_notification=None):
         self.on_notification = on_notification
         self.subscribed: list[str] = []
+        self.writes: list[tuple[list[str], dict]] = []
         self.fail_hrefs: set[str] = set()
         self.closed = False
         # When set to a rep dict, subscribe() immediately delivers that rep
@@ -215,6 +258,19 @@ class FakeObserveSession:
 
     def refresh_observes(self, paths):
         return None
+
+    def read(self, path_segs, timeout=None):
+        return 0x45, {}
+
+    def write(self, path_segs, body, timeout=None):
+        self.writes.append((list(path_segs), body))
+        return 0x44, None
+
+    def pace(self):
+        pass
+
+    def diagnostics(self):
+        return {}
 
     def close(self):
         self.closed = True

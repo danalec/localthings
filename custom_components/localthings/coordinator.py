@@ -4,27 +4,30 @@ from __future__ import annotations
 
 import asyncio
 import contextlib
-import ipaddress
 import logging
 import threading
 import time
-import zlib
+from collections.abc import Callable, Sequence
 from dataclasses import asdict
 from datetime import timedelta
 from typing import Any, cast
+from urllib.parse import unquote, urlsplit
 
-import cbor2
 from homeassistant.config_entries import ConfigEntry
 from homeassistant.core import HomeAssistant, callback
-from homeassistant.exceptions import HomeAssistantError, ServiceValidationError
+from homeassistant.exceptions import (
+    ConfigEntryAuthFailed,
+    HomeAssistantError,
+    ServiceValidationError,
+)
 from homeassistant.helpers import issue_registry as ir
-from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.device_registry import CONNECTION_NETWORK_MAC, DeviceInfo
 from homeassistant.helpers.storage import Store
 from homeassistant.helpers.update_coordinator import DataUpdateCoordinator, UpdateFailed
+from smartthings_local.errors import EndpointError, PeerInitiatedHandshakeError
 from smartthings_local.ocf.state_cache import StateCache
-from smartthings_local.protocol.dtls_session import DtlsCoapSession
 
-from . import cloudcourse
+from . import cloudcourse, probing
 from .cloudcourse import CloudCourses
 from .cloudcourse import persist as cloud_persist
 from .const import (
@@ -34,28 +37,38 @@ from .const import (
     CONF_DEVICE_KEY,
     CONF_DEVICE_TYPE,
     CONF_HOST,
-    CONF_LEAF_CERT_PEM,
-    CONF_LEAF_KEY_PEM,
     CONF_LEARN_MODES,
     CONF_LEARNED_MODES,
+    CONF_MAC,
     CONF_MANUFACTURER,
     CONF_MODEL,
+    CONF_OCF_DEVICE_ID,
     CONF_PORT,
     CONF_SERIAL,
+    CONF_TRANSPORT,
     DEFAULT_CLOUD_COURSES_ENABLED,
     DEFAULT_LEARN_MODES,
     DEVICE_SUPPORT_ISSUE_URL,
     DOMAIN,
-    DTLS_LOCAL_PORT_BASE,
     SUMMARY_INTERVAL_S,
+    TRANSPORT_LEGACY_HTTP,
 )
+from .credentials import (
+    DeviceBinding,
+    DeviceIdentityMismatch,
+    check_device_binding,
+    requires_authenticated_device_id,
+)
+from .devices import set_via_device
 from .learned import LEARNABLE, LearnedModes, persist
 from .observe import GRACE_PERIOD_S, MODE_OBSERVE, MODE_POLL, ObserveManager
 from .registry import CAPABILITIES
 from .registry.adapter import _key, flatten
 from .registry.batch import parse_device0_batch
 from .registry.by_type import resolve as resolve_registry
+from .registry.capabilities import cook
 from .registry.capabilities.common import (
+    REMOTE_CONTROL_HREFS,
     merge_items_field,
     merge_options_field,
     remote_control_enabled,
@@ -63,15 +76,19 @@ from .registry.capabilities.common import (
 )
 from .registry.capabilities.laundry import cycle_options
 from .registry.discovery import BoundEntity
+from .registry.encode import from_json_safe, json_safe
 from .registry.entities import ClimateDesc
 from .registry.identity import (
     DeviceIdentity,
     device_display_name,
     ocf_device_key,
+    proven_ocf_device_id,
     read_identity,
+    resolve_mac,
     resolve_model,
     resolve_serial,
 )
+from .registry.registry import PROBE_HREFS
 from .registry.subdevices import (
     MAIN,
     Subdevice,
@@ -81,6 +98,14 @@ from .registry.subdevices import (
     normalize_seed_batch,
 )
 from .rekey import rekey_entry
+from .transport import (
+    AuthRejected,
+    DecodeError,
+    Transport,
+    create_transport,
+    translates_resources,
+)
+from .transport import local_source_port as _local_source_port
 
 # Sentinel for apply_cloud_courses: "leave this field as it is",
 # distinct from None which means "clear it".
@@ -89,6 +114,9 @@ _KEEP = object()
 _LOGGER = logging.getLogger(__name__)
 
 _SEED_PATH = ["device", "0"]
+# Small and single-block on every board, and any answer counts, a 4.04
+# included -- see _session_answers.
+_LIVENESS_PATH = ["oic", "d"]
 
 # Discovery snapshot (issue #295): exactly what the last successful first
 # cycle fed _run_discovery, so a restart can register the same entities
@@ -105,6 +133,15 @@ def snapshot_store(hass: HomeAssistant, entry: ConfigEntry) -> Store[dict[str, A
     return Store(hass, _SNAPSHOT_VERSION, f"{DOMAIN}.{entry.entry_id}.discovery")
 
 
+_MODE_SPEC_STORE_VERSION = 1
+
+
+def mode_spec_store(hass: HomeAssistant, entry: ConfigEntry) -> Store[dict[str, Any]]:
+    """This entry's last modeSpec with entries, per actual mode href (#600);
+    see cook.with_cached_specs."""
+    return Store(hass, _MODE_SPEC_STORE_VERSION, f"{DOMAIN}.{entry.entry_id}.mode_specs")
+
+
 class _NoOpDescriptor:
     """No-op: StateCache requires an on_observation hook; this integration
     doesn't use per-capability observation hooks."""
@@ -116,29 +153,15 @@ class _NoOpDescriptor:
 _RECOVERY_RETRY_S = 600.0  # re-attempt observe mode this often while polling
 
 
-def _local_source_port(host: str) -> int:
-    """Deterministic UDP source port for this device's DTLS socket.
+def _mac_connections(mac: str | None) -> set[tuple[str, str]]:
+    """The device-registry connection a stored MAC contributes, if any.
 
-    Binding the same source port across reconnects lets the appliance evict
-    an orphaned session (unclean shutdown, no close_notify) at handshake
-    time per RFC 6347 §4.2.8, instead of holding it 5-15 min. See
-    DTLS_LOCAL_PORT_BASE. Requires smartthings-local >= 0.1.1.
-
-    Must stay unique per device on this host too. That used to be load-
-    bearing for demuxing: an unconnected socket handed every device's
-    datagrams to whichever recvfrom() happened to be listening on their
-    shared port. smartthings-local >= 0.1.3 connect()s its UDP socket
-    instead (see endpoint.py's open_connected_udp_socket), so the kernel
-    already filters incoming datagrams to each session's own resolved peer
-    -- but a distinct port per device keeps that guarantee from ever
-    depending on it, and keeps captures/logs unambiguous. Last IPv4 octet
-    as offset for the common case; a stable CRC32 fold otherwise.
+    Publishing it is what makes the manifest's `registered_devices` DHCP
+    matcher work: Home Assistant resolves a sighting's MAC against the
+    device registry and hands the flow to whichever integration owns it
+    (issue #469).
     """
-    try:
-        offset = int(ipaddress.IPv4Address(host)) & 0xFF
-    except (ipaddress.AddressValueError, ValueError):
-        offset = zlib.crc32(host.encode()) & 0xFF
-    return DTLS_LOCAL_PORT_BASE + offset
+    return {(CONNECTION_NETWORK_MAC, mac)} if mac else set()
 
 
 # Debug raw write/read caps (issue #300) -- generous enough for a real
@@ -147,11 +170,21 @@ def _local_source_port(host: str) -> int:
 _DEBUG_MAX_WRITES = 10
 _DEBUG_MAX_SETTLE_S = 30.0
 _DEBUG_MAX_VERIFY_AFTER_S = 60.0
+# Elements in one Collection batch payload. The cook start measured on an
+# NV7000BS is four; the headroom is for permutation testing, not for
+# writing a whole device at once.
+_DEBUG_MAX_BATCH_ELEMENTS = 16
+
+
+def _unrecognized(*_args, **_kwargs) -> None:
+    """A registry resolver that recognizes nothing -- see
+    transport.translates_resources."""
+    return
 
 
 def _href_to_path_segs(href: str) -> list[str]:
-    """'/mode/vs/0' -> ['mode', 'vs', '0'], the shape `sess.get`/`sess.post`
-    take. Shared by every raw debug read/write path."""
+    """'/mode/vs/0' -> ['mode', 'vs', '0'], the shape a transport's
+    `read`/`write` take. Shared by every raw debug read/write path."""
     return [s for s in str(href).strip("/").split("/") if s]
 
 
@@ -161,6 +194,14 @@ def normalize_href(href: str) -> str:
     only a trailing '0' segment: '/mode/vs/0/' slips through it unchanged
     and would land on the master's resource, not the subdevice's."""
     return "/" + "/".join(_href_to_path_segs(href))
+
+
+def split_href_query(href: str) -> tuple[str, tuple[str, ...]]:
+    """'/device/1?if=oic.if.b&x=%2C' -> ('/device/1', ('if=oic.if.b', 'x=,')):
+    one URI-Query option per `&`-separated parameter, percent-decoded as
+    RFC 7252 §6.4 specifies, fragment dropped."""
+    parts = urlsplit(href)
+    return parts.path, tuple(unquote(q) for q in parts.query.split("&") if q)
 
 
 def _coap_code_str(code: int) -> str:
@@ -176,14 +217,120 @@ def _coap_accepted(code: int) -> bool:
     return (code >> 5) == 2
 
 
-def _validate_debug_write_item(item: dict) -> tuple[list[str], str, dict, float]:
+def _validate_debug_batch_payload(payload: list) -> None:
+    """Shape checks for a Collection batch payload (issue #473).
+
+    `rep` is optional, since the measured cook start leads with a bare
+    `{"href": "/devices/0"}` marker. Hrefs are neither validated nor
+    rewritten: the payload is the experiment, and correcting a spelling
+    the caller is deliberately varying would discard the permutation.
+    """
+    if not payload or len(payload) > _DEBUG_MAX_BATCH_ELEMENTS:
+        raise ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="debug_batch_too_many_elements",
+            translation_placeholders={"max": str(_DEBUG_MAX_BATCH_ELEMENTS)},
+        )
+    for element in payload:
+        if not isinstance(element, dict) or not isinstance(element.get("href"), str):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="debug_batch_element_invalid",
+            )
+        if not element["href"].strip():
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="debug_batch_element_invalid",
+            )
+        if "rep" in element and not isinstance(element["rep"], dict):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="debug_batch_element_invalid",
+            )
+
+
+def _batch_element_reps(payload: list) -> dict[str, dict]:
+    """`{href: rep}` for the elements of a batch payload that wrote
+    something, for verification only -- the payload itself goes on the wire
+    whole.
+
+    An empty rep drops out alongside the rep-less markers: neither wrote a
+    field, and "every field I sent is present" is vacuously true of both.
+    Two elements sharing an href keep the last, the same way `verified`
+    already reports only the last payload written to a href.
+    """
+    return {
+        element["href"]: element["rep"]
+        for element in payload
+        if isinstance(element.get("rep"), dict) and element["rep"]
+    }
+
+
+def _cavity_label(resources: dict[str, dict]) -> str | None:
+    """'Upper oven'/'Lower oven' when this subdevice says which cavity it is."""
+    cavity = cook.cavity(resources)
+    return f"{cavity} oven" if cavity else None
+
+
+# Write errors after which the session is fine and a re-poll shows the
+# appliance's real state; a dead session isn't re-polled (see _async_put).
+_APPLIANCE_ANSWERED = frozenset({"command_refused", "command_not_confirmed"})
+
+
+def _refusal(code: int, response: Any) -> str:
+    """A refused write's CoAP code, with the appliance's own reason when it
+    gave one (`Control fail, <...>`; see transport.Transport)."""
+    text = _coap_code_str(code)
+    return f"{text} {response}" if isinstance(response, str) and response else text
+
+
+def _field_present_in(key: str, value: Any, readback: dict) -> bool:
+    """Whether one written field shows in `readback`.
+
+    An options[] write carries only the changed `<Prefix>_<Value>` tokens
+    and the appliance merges them into its full array (issue #54), so the
+    read-back holds every sibling token too: each written token being in it
+    is what "took" means there. Every other field compares whole."""
+    current = readback.get(key)
+    if key == "x.com.samsung.da.options" and isinstance(value, list) and isinstance(current, list):
+        return all(token in current for token in value)
+    return current == value
+
+
+def _payload_present_in(payload: dict | list, readback: dict) -> bool:
+    """Whether everything `payload` wrote is present in `readback`.
+
+    For a Property map that is the field-by-field comparison this has
+    always made. For a batch it is the same comparison per element,
+    against that element's own href in the parsed readback -- so a batch
+    reports held/changed for the resources it actually named, not for the
+    Collection it was posted to, which no useful claim can be made about.
+    """
+    if isinstance(payload, dict):
+        return all(_field_present_in(k, v, readback) for k, v in payload.items())
+    return all(
+        all((readback.get(element_href) or {}).get(k) == v for k, v in rep.items())
+        for element_href, rep in _batch_element_reps(payload).items()
+    )
+
+
+def _validate_debug_write_item(item: dict) -> tuple[list[str], str, dict | list, float, bool]:
     """The checks `async_raw_write` has always applied to a single write
     (issue #54), reused per-item by `async_raw_write_sequence` (issue
     #300). Payload is checked before href, matching the original
     single-write order -- not load-bearing for any test, just avoiding a
-    silent behavior change in the refactor."""
+    silent behavior change in the refactor.
+
+    A payload may also be a *list*, which is an OCF Collection batch --
+    the `[{href, rep}, ...]` shape `/device/0` answers on a read and the
+    one shape measured to start a cook (issue #473). Nothing here inspects
+    the href to decide: a board that takes a batch on some other
+    collection is a board this should work on too.
+    """
     payload = item.get("payload")
-    if not isinstance(payload, dict) or not payload:
+    if isinstance(payload, list):
+        _validate_debug_batch_payload(payload)
+    elif not isinstance(payload, dict) or not payload:
         raise ServiceValidationError(
             translation_domain=DOMAIN,
             translation_key="debug_payload_empty",
@@ -200,7 +347,11 @@ def _validate_debug_write_item(item: dict) -> tuple[list[str], str, dict, float]
             translation_domain=DOMAIN,
             translation_key="debug_settle_out_of_range",
         )
-    return path_segs, "/" + "/".join(path_segs), payload, settle
+    # Only an explicit False skips the follow-up read: a caller that knows
+    # nothing about the key (the options-flow debug panel) keeps the old
+    # readback-always behavior.
+    readback = item.get("readback") is not False
+    return path_segs, "/" + "/".join(path_segs), cast(dict | list, payload), settle, readback
 
 
 class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
@@ -215,6 +366,10 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     _SUBPOLL_STEP_S: float = SUMMARY_INTERVAL_S / 10  # 3.0 s
     _OBSERVE_GRACE_PERIOD_S: float = GRACE_PERIOD_S
     _RECONNECT_PAUSE_S: float = 5.0
+    # Between plaintext lookups of a moved secure port, doubling from the
+    # first to the cap while the device stays unreachable.
+    _REDISCOVERY_BACKOFF_MIN_S: float = 60.0
+    _REDISCOVERY_BACKOFF_MAX_S: float = 1800.0
 
     # A single reconnect is normal appliance behavior (README's "Known
     # device behavior"); only escalate once they pile up in a trailing
@@ -229,17 +384,36 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # A block-level ACK timeout on the summary GET doesn't prove the session
     # is dead (see _poll_once) -- require this many in a row before treating
     # it as one, so one slow transfer doesn't tear down a working OBSERVE
-    # subscription. Only covers that ambiguous case: smartthings-local
-    # >= 0.1.6 raises a distinct SessionClosedError, not a TimeoutError, the
-    # moment a dead reader thread is confirmed, and _defer_reconnect_for
-    # never defers that -- see its docstring for what changed there.
+    # subscription. Only covers the case the liveness probe says is slow
+    # rather than dead: smartthings-local >= 0.1.6 raises a distinct
+    # SessionClosedError the moment a dead reader thread is confirmed, and
+    # _defer_reconnect_for never defers that.
     _POLL_TIMEOUT_LIMIT: int = 3
+    _LIVENESS_PROBE_TIMEOUT_S: float = 5.0
 
     # Named (not inline literals) so the write-settle window in
     # async_send_command can be sized to outlast both round trips a write
     # triggers: the PUT itself, then the confirming summary poll.
     _POST_TIMEOUT_S: float = 8.0
+    # How long a write sent with Remote Control off is given before it is
+    # read back (_took_effect).
+    _CONFIRM_DELAY_S: float = 3.0
     _POLL_TIMEOUT_S: float = 35.0
+    # Summary polls run every 30 s; probe hrefs get one read per this many
+    # cycles (~30 min). A usage file gains one record a day and costs a
+    # multi-KB blockwise transfer, so anything faster is pure waste
+    # (issue #301).
+    _PROBE_EVERY_N_CYCLES: int = 60
+    # Per href, and for the whole probe pass. A few-KB blockwise transfer
+    # needs more than a Property map's 10 s, but not the summary poll's 35 s
+    # -- and the total matters more than the per-href figure here: the
+    # first-discovery probe runs inside entry setup, and the periodic one
+    # holds _session_lock, which entity writes also need. On a composite
+    # appliance the href count is 2 x (1 + subdevices), so an unbounded pass
+    # would scale with the hardware. Same reasoning, and roughly the same
+    # budget, as registry.subdevices' enumeration budget.
+    _PROBE_TIMEOUT_S: float = 12.0
+    _PROBE_BUDGET_S: float = 20.0
 
     # First-discovery subdevice enumeration is part of config-entry setup, so
     # it must have a finite wall-clock cost. A UUID-prefixed AC whose
@@ -265,11 +439,18 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             update_interval=timedelta(seconds=SUMMARY_INTERVAL_S),
         )
         self._entry = entry
-        self._session: DtlsCoapSession | None = None
+        self._session: Transport | None = None
         self._identity: DeviceIdentity | None = None
         self._discovered = False
         self.bound = []
         self._snapshot_store = snapshot_store(hass, entry)
+        self._mode_spec_store = mode_spec_store(hass, entry)
+        # Loaded by async_load_mode_specs before the first refresh.
+        self._mode_specs: dict[str, Any] = {}
+        self._mode_specs_lock = threading.Lock()
+        # Set by async_close: a save queued from another thread after unload
+        # would recreate the file async_remove_entry deletes.
+        self._closed = False
         # Both set only when this entry loaded from a snapshot instead of a
         # live poll -- see async_rehydrate.
         self._rehydrate_resources: dict[str, dict] | None = None
@@ -296,6 +477,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # climate.py's frequent per-property reads don't rebuild it from
         # scratch each time.
         self._canonical_cache: dict[tuple[str, str], dict] = {}
+        # Localized {instance_name} labels keyed by instance-name id, loaded
+        # at setup by entity.async_load_instance_names (issue #533).
+        self.instance_names: dict[str, str] = {}
         self._cache = StateCache(_NoOpDescriptor())
         self._cache.set_on_change(self._on_cache_changed)
         self._observe = ObserveManager(self._cache, logger=self._log)
@@ -306,6 +490,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # Cloud "Download" programs discovered on this device (issue #342).
         # Same restore-from-entry shape as _learned above; see cloudcourse.py.
         self._cloud = CloudCourses(entry.data.get(CONF_CLOUD_COURSES))
+        # An oven cavity's mode/setpoint/cook time chosen while idle, held
+        # until a start sends them (issue #473); see cook.HeldCook.
+        self._held_cooks: dict[Subdevice, cook.HeldCook] = {}
         # Narrowed to this device's own climate hrefs once discovery has
         # run -- see _refresh_learnable_hrefs.
         self._learnable_hrefs: set[str] = set()
@@ -324,6 +511,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         )
         self.device_info = DeviceInfo(
             identifiers={(DOMAIN, self.device_key)},
+            connections=_mac_connections(entry.data.get(CONF_MAC)),
             name=device_display_name(
                 entry.data.get(CONF_DEVICE_TYPE), entry.data.get(CONF_MODEL) or ""
             ),
@@ -337,10 +525,17 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_type_name: str | None = None
         self.one_ui_version: str = ""
         self._consecutive_poll_timeouts = 0
+        self._probe_cycles = 0
         # Set by _poll_once when the failure was the DTLS handshake itself.
         # A switched-off appliance fails there every cycle, and there is no
         # session to tear down and re-establish -- see _async_update_data.
         self._handshake_failed = False
+        # Secure-port rediscovery after a failed handshake (see
+        # _connect_session): the next lookup's earliest time, the current
+        # backoff step, and a port followed but not yet written to the entry.
+        self._next_rediscovery_ts = 0.0
+        self._rediscovery_backoff_s = 0.0
+        self._moved_port: int | None = None
         # Consecutive cycles that ended with no data from the device, so an
         # outage is reported once rather than once per poll (issue #269).
         self._failed_cycles = 0
@@ -368,10 +563,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         which copies every tracked href to build the snapshot dict."""
         return self._cache.get(href) or {}
 
+    def transport_diagnostics(self) -> dict[str, Any]:
+        return self._session.diagnostics() if self._session is not None else {}
+
     def entity_resources(self) -> dict[str, dict]:
         """The live snapshot as entity descriptors should see it: the device's
         own reps, plus this integration's discovered cloud programs merged
-        onto /course/vs/0 under cloudcourse.FIELD (issue #342).
+        onto /course/vs/0 under cloudcourse.FIELD (issue #342), and for an
+        oven the upper cavity's modeSpec shared with the lower one and each
+        idle cavity's held cook choices (issue #473, see cook.py).
 
         Merged at read time rather than applied to the state cache, so the
         synthetic field can never be polled over or written to the device --
@@ -389,7 +589,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         this per-subdevice means keying the store by actual href the way
         LearnedModes does, and migrating the persisted shape.
         """
-        snapshot = self.last_resources
+        snapshot = self._with_held_cooks(self._cook_view(self.last_resources))
         rep = snapshot.get(cloudcourse.COURSE_HREF)
         if rep is None:
             return snapshot
@@ -476,7 +676,8 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         exists_fn counterpart to canonical_resources."""
         if self._rehydrate_resources is None:
             return self.canonical_resources(subdevice)
-        return canonical_view(subdevice, self._rehydrate_resources, self.subdevices)
+        resources = self._cook_view(self._rehydrate_resources)
+        return canonical_view(subdevice, resources, self.subdevices)
 
     # ------------------------------------------------------------------
     # Learned modes (issue #327)
@@ -540,6 +741,8 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         one the device reported, so there is nothing to learn from it."""
         if source == "optimistic":
             return
+        if cook.MODE_SPEC in rep:
+            self._remember_mode_spec(href, rep)
         if href == cloudcourse.COURSE_HREF:
             self._observe_cloud_courses(rep)
         if href not in self._learnable_hrefs:
@@ -762,12 +965,19 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         if subdevice.kind == "main":
             return self.device_info
-        info = self.canonical_resources(subdevice).get("/information/vs/0", {})
+        resources = self.canonical_resources(subdevice)
+        info = resources.get("/information/vs/0", {})
         model_num = info.get("x.com.samsung.da.modelNum", "")
         model = model_num.split("|", 1)[0] if model_num else ""
         serial = info.get("x.com.samsung.da.serialNum") or None
         base_name = self.device_info.get("name") or "Samsung Appliance"
-        if model:
+        if cavity := _cavity_label(resources):
+            # A dual-cavity oven reports the same modelNum on both cavities
+            # (issue #490), so the model label below names them identically
+            # and the two are indistinguishable in HA. The cavity says which
+            # is which, and the device is the one saying it.
+            label = cavity
+        elif model:
             label = model.replace("_", " ").title()
         else:
             # No identity resource yet (or ever) for this subdevice -- fall
@@ -779,44 +989,168 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 if subdevice.kind == "indexed"
                 else "Secondary Subdevice"
             )
-        return DeviceInfo(
+        info = DeviceInfo(
             identifiers={(DOMAIN, f"{self.device_key}_{subdevice.key}")},
-            via_device=(DOMAIN, self.device_key),
             name=f"{base_name} {label}",
             manufacturer=self.device_info.get("manufacturer") or "Samsung",
             model=model or None,
             serial_number=serial,
         )
+        set_via_device(self.hass, self._entry.entry_id, info, (DOMAIN, self.device_key))
+        return info
 
     @property
     def observe_mode(self) -> str:
         return self._observe.mode
 
     def _connect_session(self) -> None:
-        host = self._entry.data[CONF_HOST]
-        port = self._entry.data[CONF_PORT]
-        cert_pem = self._entry.data[CONF_LEAF_CERT_PEM]
-        key_pem = self._entry.data[CONF_LEAF_KEY_PEM]
+        """Open a session on the stored port, following it if it moved.
 
-        sess = DtlsCoapSession(
-            host,
-            port,
-            cert_pem=cert_pem,
-            key_pem=key_pem,
+        A failed handshake on a DTLS entry asks the device, over plaintext,
+        which secure port it now advertises, and tries that one instead
+        (#435: laundry ports move across a power cycle). Backed off, so an
+        appliance that is simply off or asleep costs one lookup per backoff
+        step, not one per poll. The new port is written to the entry by
+        `_persist_moved_port` once a poll has come through on it.
+        """
+        port = self._entry.data[CONF_PORT]
+        try:
+            self._open_session_retrying_collision(port)
+            # The stored port answered, so a port followed earlier but never
+            # proven by a poll must not be written over it.
+            self._moved_port = None
+        except (TimeoutError, EndpointError) as e:
+            # Only silence or an unreachable endpoint suggests the port moved;
+            # an appliance that answered with an alert is still on this one.
+            moved = self._rediscover_port(port)
+            if moved is None:
+                raise
+            self._log.info(
+                "secure port moved from %d to %d after %s; reconnecting there",
+                port,
+                moved,
+                type(e).__name__,
+            )
+            self._open_session_retrying_collision(moved)
+            self._moved_port = moved
+        self._rediscovery_backoff_s = 0.0
+        self._next_rediscovery_ts = 0.0
+
+    def _open_session_retrying_collision(self, port: int) -> None:
+        """A handshake the appliance started at the same moment clears its
+        peer, so one immediate retry normally succeeds (issue #567, the same
+        rule as config_flow._worth_retrying)."""
+        try:
+            self._open_session(port)
+        except PeerInitiatedHandshakeError as e:
+            self._log.debug("handshake collided with the appliance's own; retrying: %s", e)
+            self._open_session(port)
+
+    def _rediscover_port(self, current: int) -> int | None:
+        """The port the device now advertises, when a lookup is due. Blocking."""
+        if self._entry.data.get(CONF_TRANSPORT) == TRANSPORT_LEGACY_HTTP:
+            return None
+        now = time.monotonic()
+        if now < self._next_rediscovery_ts:
+            return None
+        self._rediscovery_backoff_s = min(
+            max(self._rediscovery_backoff_s * 2, self._REDISCOVERY_BACKOFF_MIN_S),
+            self._REDISCOVERY_BACKOFF_MAX_S,
+        )
+        self._next_rediscovery_ts = now + self._rediscovery_backoff_s
+        try:
+            return probing.moved_secure_port(
+                self._entry.data[CONF_HOST], current, self._entry.data.get(CONF_OCF_DEVICE_ID)
+            )
+        except Exception as e:
+            self._log.debug("secure port lookup failed: %s", e)
+            return None
+
+    @callback
+    def _persist_moved_port(self) -> None:
+        """Record a port `_connect_session` followed, once a poll proved it."""
+        port, self._moved_port = self._moved_port, None
+        if port is None or self._entry.data.get(CONF_PORT) == port:
+            return
+        self.hass.config_entries.async_update_entry(
+            self._entry, data={**self._entry.data, CONF_PORT: port}
+        )
+
+    def _open_session(self, port: int) -> None:
+        host = self._entry.data[CONF_HOST]
+
+        # Which credential this entry uses is decided from the entry
+        # (transport.create_transport, session.py), not here -- adding a
+        # carrier must not mean editing every place that opens a session
+        # (issue #435).
+        sess = create_transport(
+            {**self._entry.data, CONF_PORT: port},
             on_notification=self._observe.on_notification,
             local_port=_local_source_port(host),
         )
         sess.connect()
-        sess.start_reader()
-        self._session = sess
-        self._log.debug("DTLS connected to %s:%d", host, port)
+        identity = None
         try:
-            self._identity = read_identity(sess, None)
+            identity = read_identity(sess, None)
         except Exception as e:
             self._log.debug("read_identity failed: %s", e)
-            self._identity = None
+        # Before publishing the session, not after: a session that reached
+        # the wrong appliance must never become the one polls and commands
+        # run against, and `_close_session` reads `self._session`.
+        try:
+            self._check_device_binding(identity)
+        except Exception:
+            with contextlib.suppress(Exception):
+                sess.close()
+            raise
+        self._session = sess
+        self._identity = identity
+        self._log.debug("connected to %s:%d", host, port)
+
+    def _check_device_binding(self, identity: DeviceIdentity | None) -> None:
+        """Refuse a session that authenticated against a different appliance.
+
+        Only the profiles that need it (issue #435): ECDHE-PSK has no server
+        certificate to pin during the handshake, so an authenticated
+        `/oic/d` read is the only binding available. The certificate path is
+        unchanged -- it has never done this, and the library offers it a
+        strictly better check via `SamsungServerProfile`.
+
+        Compared against `CONF_OCF_DEVICE_ID`, never `CONF_DEVICE_KEY`: the
+        key is resolved through a `di -> pi -> serial -> host` chain, so on
+        the boards that fall past the first branch it would compare a
+        platform UUID or a serial against a device UUID and report a
+        mismatch on a correctly configured appliance.
+
+        `UNPROVEN` proceeds. An entry connecting for the first time has
+        nothing stored yet, and a device that authenticated but served no
+        usable `di` has told us nothing either way -- neither is evidence of
+        the wrong device, and `_persist_identity` records the `di` once a
+        poll corroborates it.
+        """
+        if not requires_authenticated_device_id(self._entry.data):
+            return
+        binding = check_device_binding(
+            self._entry.data.get(CONF_OCF_DEVICE_ID),
+            proven_ocf_device_id(identity),
+        )
+        if binding is not DeviceBinding.MISMATCHED:
+            return
+        # The credential is fine -- it completed a handshake. What is wrong
+        # is which appliance answered, so this must not read as a rejected
+        # credential and must not start a reauthentication the user cannot
+        # fix by re-entering anything.
+        raise DeviceIdentityMismatch(
+            f"{self._entry.data[CONF_HOST]} authenticated as a different OCF device "
+            f"than this entry is bound to"
+        )
 
     def _close_session(self) -> None:
+        # Blocking, run in an executor. As of smartthings-local 0.1.12,
+        # close() actually puts the DTLS close_notify on the wire instead of
+        # just building it (issue #417), and paces the OBSERVE deregisters
+        # it now sends through the session rate limiter -- a few seconds for
+        # an appliance with a dozen relations at the 5 req/s default.
         sess = self._session
         self._session = None
         if sess is not None:
@@ -824,6 +1158,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 sess.close()
 
     async def async_close(self) -> None:
+        self._closed = True
         if self._subpoll_task is not None:
             self._subpoll_task.cancel()
             self._subpoll_task = None
@@ -856,10 +1191,13 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     def _poll_once(self) -> dict[str, dict]:
         """GET /device/0, return parsed resources. Blocking.
 
-        A `TimeoutError` here means one block's ACK didn't arrive in time --
-        not that the session is dead (earlier blocks succeeded). Left open;
-        `_async_update_data` decides whether repeated timeouts warrant a
-        reconnect. Any other exception is unambiguous -- close immediately.
+        A `TimeoutError` here means one block's ACK didn't arrive in time,
+        which is either a slow transfer or a session the appliance has
+        stopped answering. After discovery, one small GET tells them apart
+        (issue #507): if it answers, the `TimeoutError` is re-raised with the
+        session left open, and `_async_update_data` decides whether repeated
+        timeouts warrant a reconnect. If it doesn't, or on any other
+        exception, the session is closed immediately.
 
         smartthings-local >= 0.1.6 tells those two cases apart itself now:
         a reader thread that has actually died raises `SessionClosedError`
@@ -885,25 +1223,51 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             # 35s gives a slow blockwise transfer room to finish instead of
             # raising TimeoutError every cycle on an otherwise-fine device.
-            code, payload = sess.get(_SEED_PATH, timeout=self._POLL_TIMEOUT_S)
-        except TimeoutError:
+            code, body = sess.read(_SEED_PATH, timeout=self._POLL_TIMEOUT_S)
+        except TimeoutError as e:
+            # Before discovery a timeout reconnects anyway (see
+            # _defer_reconnect_for), so the probe would only add its wait.
+            if self._discovered and not self._session_answers(sess):
+                self._close_session()
+                raise RuntimeError(f"poll timed out and the session no longer answers: {e}") from e
             raise
+        except AuthRejected:
+            raise
+        except DecodeError as e:
+            # The device answered; its answer is what could not be read.
+            # Left open for the same reason a timeout is -- nothing about
+            # the session itself is in question.
+            raise RuntimeError(f"poll cbor decode: {e}") from e
         except Exception as e:
             self._close_session()
             raise RuntimeError(f"poll GET failed: {e}") from e
-        if code != 0x45 or not payload:
+        if code != 0x45 or body is None:
             self._close_session()
-            raise RuntimeError(f"poll: unexpected code {code:#04x}")
-        try:
-            body = cbor2.loads(payload)
-        except Exception as e:
-            raise RuntimeError(f"poll cbor decode: {e}") from e
+            reason = f" ({body})" if isinstance(body, str) else ""
+            raise RuntimeError(f"poll: unexpected code {code:#04x}{reason}")
         result = parse_device0_batch(body) if isinstance(body, list) else {}
         # Refresh every enumerated sibling's seed on this same poll (issue
         # #177) so its state doesn't freeze at enumeration time.
         for subdevice in self.subdevices:
             result.update(self._poll_subdevice_seed(subdevice))
         return result
+
+    def _session_answers(self, sess: Transport) -> bool:
+        """True if `sess` still answers a request, whatever the answer.
+
+        A range's session goes half-dead after about a minute (issue #507):
+        its reader stays up and notifies keep arriving, but no request is
+        answered again, so only asking can tell it from a slow transfer.
+        Blocking."""
+        try:
+            sess.pace()
+            sess.read(_LIVENESS_PATH, timeout=self._LIVENESS_PROBE_TIMEOUT_S)
+        except DecodeError:
+            return True
+        except Exception as e:
+            self._log.debug("liveness probe got no answer: %s", e)
+            return False
+        return True
 
     def _poll_subdevice_seed(self, subdevice: Subdevice) -> dict[str, dict]:
         """GET one subdevice's seed Collection, normalized to real hrefs. A
@@ -917,11 +1281,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if subdevice.flat_hrefs:
             return self._poll_subdevice_flat_hrefs(subdevice, sess)
         try:
-            code, payload = sess.get(list(subdevice.seed_path), timeout=10.0)
-            if code == 0x45 and payload:
-                body = cbor2.loads(payload)
-                if isinstance(body, list):
-                    return normalize_seed_batch(subdevice, parse_device0_batch(body))
+            code, body = sess.read(list(subdevice.seed_path), timeout=10.0)
+            if code == 0x45 and isinstance(body, list):
+                return normalize_seed_batch(subdevice, parse_device0_batch(body))
         except Exception as e:
             self._log.debug("subdevice %s seed poll failed: %s", subdevice.key, e)
         return {}
@@ -950,11 +1312,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     sess.pace()
                 first = False
                 path = actual.strip("/").split("/")
-                code, payload = sess.get(path, timeout=10.0)
-                if code == 0x45 and payload:
-                    rep = cbor2.loads(payload)
-                    if isinstance(rep, dict):
-                        result[actual] = rep
+                code, rep = sess.read(path, timeout=10.0)
+                if code == 0x45 and isinstance(rep, dict):
+                    result[actual] = rep
             except Exception as e:
                 self._log.debug(
                     "subdevice %s flat href %s poll failed: %s",
@@ -964,27 +1324,79 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 )
         return result
 
-    def _poll_hrefs_blocking(self, hrefs: list[str]) -> dict[str, dict]:
-        """GET individual hrefs sequentially. Does not reconnect on failure. Blocking."""
+    def _poll_hrefs_blocking(
+        self,
+        hrefs: list[str],
+        timeout: float = 10.0,
+        apply: bool = True,
+        budget: float | None = None,
+    ) -> dict[str, dict]:
+        """GET individual hrefs sequentially. Does not reconnect on failure. Blocking.
+
+        `timeout` is per href. The probe tier raises it: a usage file is a
+        few KB and arrives blockwise, where a hot/warm resource is a small
+        Property map (issue #301).
+
+        `apply=False` returns the reps without writing them to the state
+        cache, for the one caller that must hand them to discovery *before*
+        a rejected subdevice candidate's resources could reach a cache with
+        no eviction -- see the first-discovery probe in _async_update_data.
+
+        `budget`, when set, caps the whole pass rather than each href, and
+        each remaining GET is clamped to what is left of it. Without one, a
+        long href list multiplies `timeout` by its length while holding the
+        session.
+        """
         if self._session is None:
             return {}
         results = {}
         first = True
+        deadline = time.monotonic() + budget if budget is not None else None
         for href in hrefs:
+            if deadline is not None:
+                remaining = deadline - time.monotonic()
+                if remaining <= 0:
+                    self._log.debug("href poll budget spent; skipping %s", href)
+                    continue
+                timeout = min(timeout, remaining)
             if not first:
                 self._session.pace()
             first = False
             try:
                 path = href.strip("/").split("/")
-                code, payload = self._session.get(path, timeout=10.0)
-                if code == 0x45 and payload:
-                    rep = cbor2.loads(payload)
-                    if isinstance(rep, dict):
+                code, rep = self._session.read(path, timeout=timeout)
+                if code == 0x45 and isinstance(rep, dict):
+                    if apply:
                         self._observe.apply(href, rep, source="poll")
-                        results[href] = rep
+                    results[href] = rep
             except Exception as e:
                 self._log.debug("sub-poll %s: %s", href, e)
         return results
+
+    def _probe_blocking(self, subdevices: list[Subdevice], apply: bool = True) -> dict[str, dict]:
+        """GET the hrefs no /device/0 batch carries (registry.PROBE_HREFS),
+        once per subdevice in `subdevices`.
+
+        A 4.04 is the expected answer on boards without the resource, so a
+        failure per href is a debug log and an absent key, never a failed
+        poll -- same posture as a sibling subdevice going quiet.
+
+        Per subdevice rather than MAIN only, because on a multi-head system
+        the per-head file is the whole point: issue #329 read three heads of
+        one multi-split and got three distinct blobs, each carrying the
+        shared outdoor-unit energy counter alongside *that head's own*
+        runtime hours. Those heads were three config entries on three IPs,
+        so MAIN would have covered them -- but a composite board (issue #177)
+        puts the same several indoor units behind one IP as subdevices, and
+        `/oic/res` on the FAC_BORA fixtures advertises
+        `/<uuid>/file/transfer/vs/0` for exactly that. Probing MAIN alone
+        there would read the master's file and silently miss every sibling's,
+        losing the one number that is genuinely per-unit.
+        """
+        hrefs = [su.to_actual(href) for su in subdevices for href in PROBE_HREFS]
+        return self._poll_hrefs_blocking(
+            hrefs, timeout=self._PROBE_TIMEOUT_S, apply=apply, budget=self._PROBE_BUDGET_S
+        )
 
     # ------------------------------------------------------------------
     # Sub-poll loop (runs between summary polls)
@@ -1208,6 +1620,8 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         model: str,
         manufacturer: str,
         device_type_name: str | None,
+        ocf_device_id: str | None = None,
+        mac: str | None = None,
     ) -> None:
         """Write this device's resolved identity back onto the config entry.
 
@@ -1224,10 +1638,24 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         None leaves whatever key is already stored untouched -- see the
         caller for why a snapshot replay must not write one.
 
+        `ocf_device_id` is the `di` this poll actually proved, recorded
+        beside the key rather than folded into it (const.CONF_OCF_DEVICE_ID).
+        None leaves the stored value alone, so one read that fails to report
+        a usable `di` doesn't erase what an earlier authenticated read
+        established. Nothing acts on a change here yet -- what a *different*
+        `di` means is the credential profiles' decision (issue #435); this
+        only has to have recorded the value by the time they land.
+
+        `mac` is treated the same way, and for the same reason: half the
+        boards in tests/fixtures report no MAC at all, so one poll that
+        reads none must not discard what another one did (issue #469).
+
         Runs on the event loop, which async_update_entry requires.
         """
         identity = {
             **({CONF_DEVICE_KEY: device_key} if device_key is not None else {}),
+            **({CONF_OCF_DEVICE_ID: ocf_device_id} if ocf_device_id is not None else {}),
+            **({CONF_MAC: mac} if mac is not None else {}),
             CONF_SERIAL: serial,
             CONF_MODEL: model,
             CONF_MANUFACTURER: manufacturer,
@@ -1271,7 +1699,11 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         try:
             await self._snapshot_store.async_save(
                 {
-                    "resources": dict(resources),
+                    # json_safe/from_json_safe on the way out and back in
+                    # (registry/encode.py): a rep the JSON encoder rejects
+                    # used to fail this write entirely, and the only
+                    # symptom was this entry losing its offline load.
+                    "resources": json_safe(dict(resources)),
                     "subdevice_candidates": [asdict(su) for su in candidates],
                     "identity": asdict(ident) if ident is not None else None,
                 }
@@ -1303,7 +1735,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         if not stored or not stored.get("resources"):
             return False
 
-        resources = stored["resources"]
+        resources = from_json_safe(stored["resources"])
         try:
             ident = stored.get("identity")
             if ident is not None:
@@ -1418,7 +1850,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         bound, device_type_name, materialized, skipped = discover_partitioned(
             resources,
             self.subdevices,
-            resolve_registry,
+            resolve_registry if translates_resources(self._entry.data) else _unrecognized,
             CAPABILITIES,
             log=unbound.append,
             tier_log=_tier_log,
@@ -1476,12 +1908,23 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         self.device_key = key
 
         ident = self._identity
+        # Only a poll this entry adopted contributes a MAC, the gate `proven`
+        # gets below and for the same reason: following the lease of an
+        # appliance `_resolve_identity` refused to re-key onto would be
+        # following the wrong device. A snapshot replay is this entry's own
+        # last reading, so it does contribute -- which is how an entry
+        # already broken by a moved lease learns its MAC while the appliance
+        # is unreachable (issue #295).
+        adopted = from_snapshot or (ocf_device_key(ident) or polled_serial) == key
+        mac = resolve_mac(resources) if adopted else None
+
         model = resolve_model(model_num, ident)
         name = device_display_name(device_type_name, model)
         mfr = (ident.manufacturer if ident else "") or "Samsung"
 
         self.device_info = DeviceInfo(
             identifiers={(DOMAIN, key)},
+            connections=_mac_connections(mac or self._entry.data.get(CONF_MAC)),
             name=name,
             manufacturer=mfr,
             model=model,
@@ -1490,7 +1933,27 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # writing a key here would freeze a pre-v4 entry's legacy key in as
         # if a poll had confirmed it, and the real UUID would later look
         # like an identity to defend against rather than one to adopt.
-        self._persist_identity(None if from_snapshot else key, serial, model, mfr, device_type_name)
+        #
+        # The proven `di` gets the same None for the same reason, and one
+        # more: only when this entry actually *is* the device that answered.
+        # `_resolve_identity` returns the registered key unchanged when an
+        # uncorroborated appliance answers at this address ("keeping the
+        # registered identity"), and it withholds that appliance's serial
+        # for exactly this reason -- recording its `di` instead would hand
+        # the intruder the very field issue #435's credential binding is
+        # meant to catch it with. When a poll does report a usable `di`
+        # that is the whole of `_resolve_identity`'s answer, so key equality
+        # is precisely "this entry adopted what just answered".
+        proven = None if from_snapshot else proven_ocf_device_id(ident)
+        self._persist_identity(
+            None if from_snapshot else key,
+            serial,
+            model,
+            mfr,
+            device_type_name,
+            proven if proven == key else None,
+            mac,
+        )
         if not from_snapshot:
             # A coverage gap is a claim about what the device reports, so only
             # a live poll gets to make it. Replaying a snapshot would restate
@@ -1556,6 +2019,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """
         hrefs = self._hot_hrefs + self._warm_hrefs
         if not hrefs:
+            return
+        sess = self._session
+        if sess is not None and not sess.supports_observe:
+            # A request/response transport has no OBSERVE to attempt, and
+            # `supports_observe` is how it says so. Without this the burst
+            # below still runs every cycle and each href logs a warning for
+            # a capability the transport never claimed -- on the 8888 bridge
+            # that was four warnings every ten minutes, forever.
+            self._observe.abandon_observe_attempt()
             return
         self._last_observe_attempt_ts = time.monotonic()
         async with self._session_lock:
@@ -1643,11 +2115,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """True if this poll failure should NOT trigger a reconnect this
         cycle.
 
-        A `TimeoutError` means one block's ACK was late, not that the
-        session is dead (see `_poll_once`). A recent OBSERVE notify is proof
-        the channel is live, so always defer then. Otherwise defer until
-        `_POLL_TIMEOUT_LIMIT` consecutive timeouts pile up. Any other
-        exception reconnects immediately.
+        A `TimeoutError` that reaches here means the session still answered
+        `_poll_once`'s liveness probe, so the transfer was slow rather than
+        the session dead. Defer until `_POLL_TIMEOUT_LIMIT` consecutive
+        timeouts pile up. Any other exception reconnects immediately.
+
+        A recent OBSERVE notify no longer defers anything or resets the
+        count (issue #507): a range kept pushing notifies on a session that
+        had stopped answering requests, which stretched the outage instead
+        of ending it. Only a sweep that gets through resets the count.
 
         That includes `SessionClosedError`, which is the point: before
         smartthings-local 0.1.6, a reader thread that had actually died was
@@ -1671,12 +2147,6 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             return False
         if not isinstance(e, TimeoutError):
             return False
-        if self._observe.mode == MODE_OBSERVE and self._observe.recently_notified():
-            # Recent push is proof of life -- reset the counter too, so
-            # timeouts from an earlier quiet stretch don't carry over and
-            # trigger a false reconnect once the device goes quiet again.
-            self._consecutive_poll_timeouts = 0
-            return True
         self._consecutive_poll_timeouts += 1
         return self._consecutive_poll_timeouts < self._POLL_TIMEOUT_LIMIT
 
@@ -1692,6 +2162,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
 
     def _mark_device_answered(self) -> None:
         """Clear the bookkeeping a poll getting through invalidates."""
+        self._persist_moved_port()
         self._consecutive_poll_timeouts = 0
         if self._failed_cycles:
             self._log.info("device answered again after %d failed cycles", self._failed_cycles)
@@ -1740,6 +2211,9 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             try:
                 resources = await self.hass.async_add_executor_job(self._poll_once)
                 self._mark_device_answered()
+            except AuthRejected as e:
+                await self.hass.async_add_executor_job(self._close_session)
+                raise ConfigEntryAuthFailed(str(e)) from e
             except Exception as e:
                 if self._defer_reconnect_for(e):
                     self._log.debug(
@@ -1758,6 +2232,14 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # switched-off appliance costs -- two handshake timeouts
                     # per cycle, and the same wait again on every setup
                     # attempt while it stays dark (issue #269).
+                    return self._device_unreachable("device unreachable", e)
+                if self._failed_cycles:
+                    # Already reported dark, so the retry below can only
+                    # repeat the failure. The 8888 transport needs this
+                    # guard: its connect() never touches the network, so
+                    # `_handshake_failed` never fires and a switched-off
+                    # washer warned and polled twice every cycle (issue #269).
+                    await self.hass.async_add_executor_job(self._close_session)
                     return self._device_unreachable("device unreachable", e)
                 # A lone reconnect is routine (README's "Known device
                 # behavior"); only warn once they pile up. Pause first so
@@ -1826,9 +2308,43 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         "config entry is reloaded: %s",
                         e,
                     )
+                # Folded in before _run_discovery so a probe href is bound
+                # on the first cycle like any batch href -- and so it is
+                # registered as covered rather than surfacing as a coverage
+                # gap the moment it appears in `resources`.
+                try:
+                    # Candidates as well as MAIN, and before _run_discovery:
+                    # discovery is what binds an href to an entity and it runs
+                    # exactly once, so a sibling's file probed after it would
+                    # be cached forever and never surface as the per-head
+                    # runtime issue #329 is about. apply=False keeps a
+                    # rejected candidate's reps out of the eviction-free
+                    # cache; the apply loop below re-adds the live ones from
+                    # `resources` after _live_subdevice_resources filters it.
+                    resources.update(
+                        await self.hass.async_add_executor_job(
+                            self._probe_blocking, [MAIN, *self.subdevices], False
+                        )
+                    )
+                except Exception as e:
+                    self._log.debug("probe failed on first discovery: %s", e)
 
         source = "sweep" if self._discovered else "poll"
         first_cycle = not self._discovered
+        if not first_cycle and PROBE_HREFS:
+            # Counter rather than a timer: a probe is only meaningful on a
+            # cycle that already reached the device, and this rides one that
+            # just did.
+            self._probe_cycles += 1
+            if self._probe_cycles >= self._PROBE_EVERY_N_CYCLES:
+                self._probe_cycles = 0
+                async with self._session_lock:
+                    try:
+                        await self.hass.async_add_executor_job(
+                            self._probe_blocking, [MAIN, *self.subdevices]
+                        )
+                    except Exception as e:
+                        self._log.debug("probe cycle failed: %s", e)
         if first_cycle:
             # Discovery runs before the apply loop so a rejected candidate's
             # resources never reach the state cache (issue #177) --
@@ -1888,14 +2404,23 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         """Write a value to the device. Retries once on a dead session
         (issue #294); raises HomeAssistantError if that retry fails too.
 
-        A description-level validate_fn (SwitchDesc only, currently) rejects
+        A description-level validate_fn (SwitchDesc and SelectDesc) rejects
         a write with a user-facing message ahead of write_fn's silent
         no-op. The remote-control check runs first, unconditionally, unless
         the user opted out via CONF_BYPASS_REMOTE_CONTROL (issue #54: some
-        devices accept some writes even while reporting remote control off)
-        or the laundry firmware declares itself writable without Smart
-        Control."""
+        devices accept some writes even while reporting remote control off),
+        the laundry firmware declares itself writable without Smart Control,
+        or the write's own descriptor doesn't need it (needs_remote_control)."""
         desc = bound_entity.desc
+        cook_param = getattr(desc, "cook_param", None)
+        if cook_param == cook.PARAM_START:
+            await self.async_start_cooking(bound_entity.subdevice)
+            return
+        if cook_param is not None and self._holds_cook(bound_entity.subdevice):
+            # Nothing reaches the appliance, so Remote Control is only
+            # checked at the start.
+            self._hold_cook(bound_entity.subdevice, desc, cook_param, payload)
+            return
         write_fn = getattr(desc, "write_fn", None)
         if write_fn is None:
             return
@@ -1907,22 +2432,22 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # tree to read one rep.
         rep = self.entity_rep(href or "")
         # The remote-control gate below keys off the raw on-the-wire href
-        # and a raw snapshot -- /remotectrl/* is a shared, MAIN-only
-        # resource that a subdevice's canonical_resources() view (owned
-        # hrefs only) would drop entirely. write_fn/validate_fn, by
-        # contrast, are written against canonical hrefs (same convention as
-        # exists_fn/rep_fn -- see entity.py's _resources), so they get this
-        # entity's own subdevice view instead of the raw snapshot: without
-        # it, a composite device's write_fn reading resources.get(some
-        # canonical href) (e.g. airconditioner._temperature_step) would
-        # silently see the master's resource instead of its own subdevice's.
+        # and a raw snapshot (see _remote_control_enabled). write_fn/
+        # validate_fn, by contrast, are written against canonical hrefs
+        # (same convention as exists_fn/rep_fn -- see entity.py's
+        # _resources), so they get this entity's own subdevice view instead
+        # of the raw snapshot: without it, a composite device's write_fn
+        # reading resources.get(some canonical href) (e.g.
+        # airconditioner._temperature_step) would silently see the master's
+        # resource instead of its own subdevice's.
         raw_resources = self._cache.snapshot()
         bypass_remote_control = self._entry.options.get(CONF_BYPASS_REMOTE_CONTROL, False)
-        if (
+        remote_control_off = (
             not bypass_remote_control
             and remote_control_required_for_write(raw_resources, href or "")
-            and not remote_control_enabled(raw_resources)
-        ):
+            and not self._remote_control_enabled(bound_entity.subdevice)
+        )
+        if remote_control_off and desc.needs_remote_control:
             raise ServiceValidationError(
                 translation_domain=DOMAIN,
                 translation_key="remote_control_disabled",
@@ -1959,9 +2484,12 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         write_href = bound_entity.subdevice.to_actual("/" + "/".join(path_segs))
         path_segs = [s for s in write_href.strip("/").split("/") if s]
 
-        # Apply optimistically before starting the settle guard -- guard and
-        # apply share the same gate (mark_write_pending), so reversing the
-        # order would drop the very update it exists to protect (issue #27).
+        # Apply readable writes optimistically before starting the settle
+        # guard -- guard and apply share the same gate (mark_write_pending),
+        # so reversing the order would drop the very update it exists to
+        # protect (issue #27). A write-only button has no readable field to
+        # protect: merging its command body would manufacture state the
+        # appliance can never confirm, so it skips both operations.
         #
         # settle_s must outlast the PUT plus the confirming refresh, not
         # DEFAULT_SETTLE_S's fixed few seconds: the refresh is a full
@@ -1981,27 +2509,101 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         # option/item for the settle window. Pre-merge here the way the
         # device does, so the optimistic cache entry stays complete; the
         # wire `body` stays minimal.
-        optimistic_body = body
-        new_options = body.get("x.com.samsung.da.options")
-        if isinstance(new_options, list):
-            cached_options = (self._cache.get(write_href) or {}).get("x.com.samsung.da.options")
-            optimistic_body = {
-                **optimistic_body,
-                "x.com.samsung.da.options": merge_options_field(cached_options, new_options),
-            }
-        # Same fact, items[] shape (see airconditioner._climate_write's
-        # vendor temperature write).
-        new_items = body.get("x.com.samsung.da.items")
-        if isinstance(new_items, list):
-            cached_items = (self._cache.get(write_href) or {}).get("x.com.samsung.da.items")
-            optimistic_body = {
-                **optimistic_body,
-                "x.com.samsung.da.items": merge_items_field(cached_items, new_items),
-            }
-        self._observe.apply(write_href, optimistic_body, source="optimistic")
-        self._observe.mark_write_pending(
-            write_href, settle_s=self._POST_TIMEOUT_S + self._POLL_TIMEOUT_S
-        )
+        write_only = getattr(desc, "write_only", False)
+        previous_settle = self._observe.settle_deadline(write_href)
+        armed_settle = 0.0
+        if not write_only:
+            optimistic_body = body
+            new_options = body.get("x.com.samsung.da.options")
+            if isinstance(new_options, list):
+                cached_options = (self._cache.get(write_href) or {}).get("x.com.samsung.da.options")
+                optimistic_body = {
+                    **optimistic_body,
+                    "x.com.samsung.da.options": merge_options_field(cached_options, new_options),
+                }
+            # Same fact, items[] shape (see airconditioner._climate_write's
+            # vendor temperature write).
+            new_items = body.get("x.com.samsung.da.items")
+            if isinstance(new_items, list):
+                cached_items = (self._cache.get(write_href) or {}).get("x.com.samsung.da.items")
+                optimistic_body = {
+                    **optimistic_body,
+                    "x.com.samsung.da.items": merge_items_field(cached_items, new_items),
+                }
+            self._observe.apply(write_href, optimistic_body, source="optimistic")
+            armed_settle = self._observe.mark_write_pending(
+                write_href, settle_s=self._POST_TIMEOUT_S + self._POLL_TIMEOUT_S
+            )
+
+        def _rearm() -> None:
+            nonlocal armed_settle
+            # The retry's own reconnect pause + second PUT can eat well
+            # into the settle window armed above, leaving too little of it
+            # for the confirming poll below and reviving the
+            # revert-then-reapply symptom settle_s exists to prevent (issue
+            # #9). Re-arm it fresh now that the write actually landed.
+            if not write_only:
+                armed_settle = self._observe.mark_write_pending(
+                    write_href, settle_s=self._POST_TIMEOUT_S + self._POLL_TIMEOUT_S
+                )
+
+        try:
+            await self._async_put(path_segs, body, write_href, on_retry=_rearm)
+            if (
+                remote_control_off
+                and not write_only
+                and not await self._took_effect(path_segs, body)
+            ):
+                # Sent only because the descriptor waives Remote Control. Some
+                # boards answer 2.04 and drop a write with it off
+                # (docs/investigations/oven-cycle-start.md); others take it
+                # but are still winding down (a drain) when read back. A
+                # write-only resource (the clock) never reads back what it
+                # took, so there is nothing to confirm.
+                raise HomeAssistantError(
+                    translation_domain=DOMAIN,
+                    translation_key="command_not_confirmed",
+                    translation_placeholders={"href": write_href},
+                )
+        except (HomeAssistantError, asyncio.CancelledError) as err:
+            # Not known to have landed: let the next poll replace the
+            # optimistic value instead of holding it for the settle window.
+            if not write_only:
+                self._observe.restore_write_pending(write_href, previous_settle, armed_settle)
+            if getattr(err, "translation_key", None) in _APPLIANCE_ANSWERED:
+                await self.async_request_refresh()
+            raise
+        await self.async_request_refresh()
+
+    async def _took_effect(self, path_segs: list[str], body: dict | list) -> bool:
+        """Whether a fresh read shows `body`. A read that fails proves
+        nothing, so it counts as taken."""
+        await asyncio.sleep(self._CONFIRM_DELAY_S)
+
+        def _read() -> Any:
+            sess = self._session
+            if sess is None:
+                return None
+            code, rep = sess.read(path_segs, timeout=self._POST_TIMEOUT_S)
+            return rep if _coap_accepted(code) and isinstance(rep, dict) else None
+
+        async with self._session_lock:
+            try:
+                rep = await self.hass.async_add_executor_job(_read)
+            except Exception as err:
+                self._log.debug("confirming read of %s failed: %s", path_segs, err)
+                return True
+        return rep is None or _payload_present_in(body, rep)
+
+    async def _async_put(
+        self,
+        path_segs: list[str],
+        body: dict | list,
+        write_href: str,
+        on_retry: Callable[[], None] | None = None,
+    ) -> None:
+        """PUT `body`, reconnecting and retrying once on a dead session.
+        Raises HomeAssistantError if the retry fails too."""
 
         def _do_put():
             if self._session is None:
@@ -2009,15 +2611,16 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
             sess = self._session
             if sess is None:
                 raise RuntimeError("no session")
-            code, _ = sess.post(path_segs, cbor2.dumps(body), timeout=self._POST_TIMEOUT_S)
+            code, response = sess.write(path_segs, body, timeout=self._POST_TIMEOUT_S)
             self._log.info("PUT %s → code %#04x", write_href, code)
+            return code, response
 
         # Mirrors the poll path's reconnect-and-retry (issue #294): a PUT
         # landing on a session Samsung's firmware closed between polls used
         # to be silently lost -- no retry, no user-facing error.
         async with self._session_lock:
             try:
-                await self.hass.async_add_executor_job(_do_put)
+                code, response = await self.hass.async_add_executor_job(_do_put)
             except Exception as e:
                 self._log.warning("command failed for %s, reconnecting: %s", write_href, e)
                 await self.hass.async_add_executor_job(self._close_session)
@@ -2032,7 +2635,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     self._resubscribe_due = True
                 await asyncio.sleep(self._RECONNECT_PAUSE_S)
                 try:
-                    await self.hass.async_add_executor_job(_do_put)
+                    code, response = await self.hass.async_add_executor_job(_do_put)
                 except Exception as e2:
                     self._log.error("command failed for %s after reconnect: %s", write_href, e2)
                     raise HomeAssistantError(
@@ -2040,15 +2643,196 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                         translation_key="command_failed",
                         translation_placeholders={"href": write_href, "error": str(e2)},
                     ) from e2
-                # The retry's own reconnect pause + second PUT can eat well
-                # into the settle window armed above, leaving too little of
-                # it for the confirming poll below and reviving the
-                # revert-then-reapply symptom settle_s exists to prevent
-                # (issue #9). Re-arm it fresh now that the write actually
-                # landed.
-                self._observe.mark_write_pending(
-                    write_href, settle_s=self._POST_TIMEOUT_S + self._POLL_TIMEOUT_S
-                )
+                if on_retry is not None:
+                    on_retry()
+        if not _coap_accepted(code):
+            # A refusal is the appliance's answer, not a dead session, so it
+            # is reported rather than retried.
+            raise HomeAssistantError(
+                translation_domain=DOMAIN,
+                translation_key="command_refused",
+                translation_placeholders={"href": write_href, "error": _refusal(code, response)},
+            )
+
+    # ------------------------------------------------------------------
+    # Oven and microwave cook start (issue #473). See cook.py.
+    # ------------------------------------------------------------------
+
+    def _cook_view(self, resources: dict[str, dict]) -> dict[str, dict]:
+        """`resources` with remembered modeSpecs filled in and the upper
+        cavity's shared with the others (see cook.py)."""
+        resources = cook.with_cached_specs(resources, self._mode_specs)
+        siblings = [sub.to_actual for sub in self.subdevices if sub != MAIN]
+        return cook.share_mode_spec(resources, siblings)
+
+    async def async_load_mode_specs(self) -> None:
+        try:
+            stored = await self._mode_spec_store.async_load()
+        except Exception as e:  # corrupt or unreadable store
+            self._log.warning("could not read remembered modeSpecs: %s", e)
+            return
+        if isinstance(stored, dict):
+            self._mode_specs = {
+                href: spec for href, spec in stored.items() if cook.has_entries(spec)
+            }
+
+    def remembered_mode_specs(self) -> dict[str, dict[str, Any]]:
+        """For diagnostics: each remembered spec, and whether the device's
+        own rep for that href currently lacks one."""
+        live = self.last_resources
+        return {
+            href: {
+                "in_use": href in live and not cook.has_entries(live[href].get(cook.MODE_SPEC)),
+                "spec": spec,
+            }
+            for href, spec in sorted(self._mode_specs.items())
+        }
+
+    def _remember_mode_spec(self, href: str, rep: dict) -> None:
+        """Runs from _on_rep_applied, on whichever thread applied `rep`."""
+        spec = rep.get(cook.MODE_SPEC)
+        if not cook.has_entries(spec):
+            return
+        with self._mode_specs_lock:
+            if self._mode_specs.get(href) == spec:
+                return
+            self._mode_specs = {**self._mode_specs, href: spec}
+        self.hass.loop.call_soon_threadsafe(self._schedule_mode_spec_save)
+
+    @callback
+    def _schedule_mode_spec_save(self) -> None:
+        if self._closed:
+            return
+        # Tracked by the entry, so unloading it cancels a save that would
+        # otherwise land after async_remove_entry deleted the file.
+        self._entry.async_create_background_task(
+            self.hass, self._async_save_mode_specs(), "localthings_save_mode_specs"
+        )
+
+    async def _async_save_mode_specs(self) -> None:
+        try:
+            await self._mode_spec_store.async_save(dict(self._mode_specs))
+        except Exception as e:
+            self._log.warning("could not write remembered modeSpecs: %s", e)
+
+    def _cavity_resources(self, subdevice: Subdevice) -> dict[str, dict]:
+        """What the appliance reported for one cavity, in its canonical
+        view, with the upper cavity's modeSpec shared -- the cook checks'
+        input. Held choices are not in it."""
+        return canonical_view(subdevice, self._cook_view(self.last_resources), self.subdevices)
+
+    def _with_held_cooks(self, snapshot: dict[str, dict]) -> dict[str, dict]:
+        """Each idle cavity's held choices, written over its own actual
+        hrefs in `snapshot` (a copy this method may change)."""
+        for subdevice, held in self._held_cooks.items():
+            if not held.values:
+                continue
+            view = canonical_view(subdevice, snapshot, self.subdevices)
+            overlaid = held.overlay(view)
+            if overlaid is view:
+                continue
+            for href in (cook.MODE_HREF, cook.TEMPERATURES_HREF, cook.OPERATION_HREF):
+                if href in overlaid:
+                    snapshot[subdevice.to_actual(href)] = overlaid[href]
+        return snapshot
+
+    def _remote_control_enabled(self, subdevice: Subdevice) -> bool:
+        """Smart Control for the subdevice being written. Each cavity of a
+        dual-cavity oven reports its own /remotectrl (the NV75N's
+        /remotectrl/vs/1, #300's /remotectrl/vs/2), so a subdevice's own
+        copy decides; one that reports none falls back to MAIN's."""
+        raw = self._cache.snapshot()
+        if subdevice != MAIN:
+            own = {
+                href: raw[actual]
+                for href in REMOTE_CONTROL_HREFS
+                if (actual := subdevice.to_actual(href)) in raw
+            }
+            if own:
+                return remote_control_enabled(own)
+        return remote_control_enabled(raw)
+
+    def _holds_cook(self, subdevice: Subdevice) -> bool:
+        """Whether a mode/setpoint/cook-time write is held rather than sent:
+        an idle cavity that can start one of its modes. Anything else writes
+        through as before -- mid-cook changes hold on the board, and a board
+        that can't be started keeps the plain write."""
+        resources = self._cavity_resources(subdevice)
+        return cook.is_idle(resources) and bool(cook.startable_modes(resources))
+
+    def _hold_cook(self, subdevice: Subdevice, desc: Any, param: str, payload: Any) -> None:
+        validate_fn = getattr(desc, "validate_fn", None)
+        resources = self._cavity_resources(subdevice)
+        if validate_fn is not None and (error := validate_fn(payload, {}, resources)):
+            raise ServiceValidationError(translation_domain=DOMAIN, translation_key=error)
+        # The cook-time number is in minutes; the plan counts seconds.
+        value = round(float(payload) * 60) if param == cook.PARAM_DURATION else payload
+        try:
+            self._held_cooks.setdefault(subdevice, cook.HeldCook()).hold(param, value, resources)
+        except cook.CookStartError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key=err.key,
+                translation_placeholders=err.placeholders,
+            ) from err
+        self._log.info("holding %s=%r until the cook starts", param, value)
+        self._canonical_cache.clear()
+        self.async_set_updated_data(flatten(self.bound, self.entity_resources()))
+
+    async def async_start_cooking(
+        self,
+        subdevice: Subdevice = MAIN,
+        *,
+        mode: str | None = None,
+        temperature: float | None = None,
+        duration: int | None = None,
+    ) -> None:
+        """Start a cook in one Collection write to the cavity's own
+        collection (`/device/0`, or `/device/1` for a lower cavity).
+
+        With no arguments this starts what the cavity's mode/setpoint/
+        cook-time entities hold; with any, it starts exactly those
+        (`temperature` in the oven's own unit, `duration` in seconds) and
+        fills the rest from the mode's own defaults. Either way it is
+        checked against the board's modeSpec first, and a rejected start
+        raises before anything is sent.
+        """
+        if not subdevice.seed_path:
+            # A prefixed subdevice with no collection of its own (#205): no
+            # collection to send the batch to.
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="cook_start_not_supported"
+            )
+        if not self._entry.options.get(
+            CONF_BYPASS_REMOTE_CONTROL, False
+        ) and not self._remote_control_enabled(subdevice):
+            raise ServiceValidationError(
+                translation_domain=DOMAIN, translation_key="remote_control_disabled"
+            )
+        resources = self._cavity_resources(subdevice)
+        held = self._held_cooks.setdefault(subdevice, cook.HeldCook())
+        try:
+            if mode is None and temperature is None and duration is None:
+                plan = held.plan(resources)
+            else:
+                plan = cook.plan_start(resources, mode, temperature, duration)
+        except cook.CookStartError as err:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key=err.key,
+                translation_placeholders=err.placeholders,
+            ) from err
+        path = list(subdevice.seed_path)
+        # Inner hrefs as this cavity's reads and writes already spell them,
+        # which started the NV7B6665IAA's lower zone (#597).
+        body = plan.batch(None if subdevice == MAIN else subdevice.to_actual)
+        self._log.info("starting cook on /%s: %s", "/".join(path), plan)
+        # No readback after the write: smartthings-local found the
+        # fetch-back itself is what reverts some boards, and neither
+        # measured start had one.
+        await self._async_put(path, body, "/" + "/".join(path))
+        held.clear()
+        self._canonical_cache.clear()
         await self.async_request_refresh()
 
     # ------------------------------------------------------------------
@@ -2060,30 +2844,63 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
     # care.
     # ------------------------------------------------------------------
 
-    def _raw_write_blocking(self, path_segs: list[str], body: dict, href: str) -> tuple[int, dict]:
+    def _raw_write_blocking(
+        self, path_segs: list[str], body: dict | list, href: str, readback: bool = True
+    ) -> tuple[int, dict, Any]:
         """Debug primitive: POST an arbitrary patch, then read the href
-        back for ground truth. Blocking -- runs in executor."""
+        back for ground truth. Blocking -- runs in executor.
+
+        Returns `(code, new_rep, response_body)`. `response_body` is the
+        POST's own decoded body, which used to be discarded: the fridge answers with
+        a verbatim echo worth nothing (docs/investigations/filter-reset.md,
+        trap 2), but the laundry firmware answers `"Control fail, <...>"`
+        and no oven board has ever been checked -- a board's own reason for
+        refusing a write is not something to throw away on the floor.
+
+        `readback=False` skips the follow-up GET entirely, leaving
+        `new_rep` empty. `smartthings-local`'s bridge avoids that GET
+        deliberately, on the grounds that the fetch-back is itself what
+        triggers some boards' revert -- so on a resource that reverts, the
+        readback is a variable in the experiment and has to be removable.
+
+        On a Collection the readback answers a batch list rather than a
+        Property map, so `new_rep` is that batch parsed to `{href: rep}` --
+        the state of the resources the write named, which is the only
+        reading of "after" a batch has. A caller tells the two apart by the
+        payload it sent, the same way it already tells apart which fields
+        to look for.
+        """
         if self._session is None:
             self._connect_session()
         sess = self._session
         if sess is None:
             raise RuntimeError("no session")
-        code, _ = sess.post(path_segs, cbor2.dumps(body), timeout=self._POST_TIMEOUT_S)
+        code, response_body = sess.write(path_segs, body, timeout=self._POST_TIMEOUT_S)
         self._log.warning("DEBUG raw write POST %s %r → code %#04x", href, body, code)
         new_rep: dict = {}
-        try:
-            sess.pace()
-            rcode, payload = sess.get(path_segs, timeout=10.0)
-            if rcode == 0x45 and payload:
-                rep = cbor2.loads(payload)
-                if isinstance(rep, dict):
+        if readback:
+            try:
+                sess.pace()
+                rcode, rep = sess.read(path_segs, timeout=10.0)
+                if rcode == 0x45 and isinstance(rep, dict):
                     self._observe.apply(href, rep, source="poll")
                     new_rep = rep
-        except Exception as e:
-            self._log.debug("raw write follow-up read failed: %s", e)
-        return code, new_rep
+                elif rcode == 0x45 and isinstance(rep, list):
+                    # Reported, never applied. A prefixed subdevice's
+                    # batch may omit its own prefix (see
+                    # subdevices.normalize_seed_batch), and this
+                    # primitive has no subdevice to normalize against,
+                    # so applying would land a sibling's reps on the
+                    # master's hrefs. The sequence's own refresh picks
+                    # them up correctly a moment later.
+                    new_rep = parse_device0_batch(rep)
+            except Exception as e:
+                self._log.debug("raw write follow-up read failed: %s", e)
+        return code, new_rep, response_body
 
-    def _raw_read_blocking(self, path_segs: list[str], href: str) -> tuple[int, dict, Any]:
+    def _raw_read_blocking(
+        self, path_segs: list[str], href: str, query: Sequence[str] = ()
+    ) -> tuple[int, dict, Any]:
         """Debug primitive: a live GET, deliberately bypassing the cache
         (issue #300) -- the cache can be up to a poll interval stale,
         exactly the staleness that makes testing whether a write held or
@@ -2100,27 +2917,32 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         an accepted-but-empty `2.05 {}`, which reads as "the resource is
         there and has nothing in it" -- the opposite of what a full batch
         means, and how issue #335's `/sec/devices` was nearly written off.
+
+        `query` is sent as URI-Query options (e.g. `if=oic.if.b`). A rep read
+        under one is kept out of the cache, since an interface query can
+        change which properties the appliance returns.
         """
         if self._session is None:
             self._connect_session()
         sess = self._session
         if sess is None:
             raise RuntimeError("no session")
-        code, payload = sess.get(path_segs, timeout=10.0)
         rep: dict = {}
         body: Any = None
-        if code == 0x45 and payload:
-            try:
-                body = cbor2.loads(payload)
-            except Exception as e:
-                self._log.debug("raw read decode failed for %s: %s", href, e)
-                body = None
-            if isinstance(body, dict):
+        try:
+            code, body = sess.read(path_segs, timeout=10.0, query=query)
+        except DecodeError as e:
+            # A body that will not decode is itself what a debug read exists
+            # to surface, so it is reported raw rather than raised.
+            self._log.debug("raw read decode failed for %s: %s", href, e)
+            code, body = e.code, e.payload
+        if code == 0x45 and isinstance(body, dict):
+            if not query:
                 self._observe.apply(href, body, source="poll")
-                rep = body
+            rep = body
         return code, rep, body
 
-    async def async_raw_read(self, href: str) -> tuple[int, dict, Any]:
+    async def async_raw_read(self, href: str, query: Sequence[str] = ()) -> tuple[int, dict, Any]:
         """Debug-only live GET (issue #300, backs the read_resource
         service). Same href validation as async_raw_write. Three-tuple --
         see `_raw_read_blocking` for why the raw body comes back alongside
@@ -2135,7 +2957,7 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         async with self._session_lock:
             try:
                 return await self.hass.async_add_executor_job(
-                    self._raw_read_blocking, path_segs, norm_href
+                    self._raw_read_blocking, path_segs, norm_href, query
                 )
             except Exception as e:
                 # Unlike async_raw_write_sequence, there's nothing to
@@ -2144,13 +2966,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 # path a raw session exception would otherwise reach a user
                 # untranslated (write_resource already goes through
                 # HomeAssistantError; this brings read_resource in line).
-                if not isinstance(e, TimeoutError):
+                if not isinstance(e, (TimeoutError, ValueError, TypeError)):
                     # Same TimeoutError-vs-anything-else split as
                     # _poll_once: a block-ACK timeout alone doesn't prove
                     # the session is dead, but anything else does -- and
                     # leaving a confirmed-dead one installed would fail
                     # every read/write identically until the next real
-                    # poll cycle's own reconnect notices.
+                    # poll cycle's own reconnect notices. ValueError and
+                    # TypeError are the library refusing a malformed path
+                    # or query before sending, which says nothing about it.
                     await self.hass.async_add_executor_job(self._close_session)
                 self._log.warning("debug read failed for %s: %s", norm_href, e)
                 raise HomeAssistantError(
@@ -2158,6 +2982,115 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     translation_key="debug_read_failed",
                     translation_placeholders={"href": norm_href, "error": str(e)},
                 ) from e
+
+    # observe_resource's listening window, in seconds, and how many
+    # notifications one call keeps.
+    OBSERVE_DURATION_MAX_S: float = 120.0
+    _OBSERVE_KEEP: int = 200
+
+    async def async_observe_resource(
+        self, href: str, query: Sequence[str] = (), duration: float = 30.0
+    ) -> dict[str, Any]:
+        """Debug-only OBSERVE on one href for `duration` seconds, after one
+        live GET of it (issue #607: whether a board pushes fields its GET
+        leaves out). Backs the observe_resource service.
+
+        The session lock is held only to subscribe and unsubscribe, so polls
+        and writes carry on while it listens. An href this coordinator
+        observes is only listened to: unsubscribing retires every relation
+        on the path, its own included."""
+        path_segs = _href_to_path_segs(href)
+        if not path_segs:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="resource_href_required",
+            )
+        if not 0 < duration <= self.OBSERVE_DURATION_MAX_S:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="observe_duration_out_of_range",
+                translation_placeholders={"max": str(int(self.OBSERVE_DURATION_MAX_S))},
+            )
+        if self._entry.data.get(CONF_TRANSPORT) == TRANSPORT_LEGACY_HTTP:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="observe_not_supported",
+            )
+        norm_href = "/" + "/".join(path_segs)
+        query_refused = ServiceValidationError(
+            translation_domain=DOMAIN,
+            translation_key="observe_query_while_observed",
+            translation_placeholders={"href": norm_href},
+        )
+        if query and self._observe.coordinator_observes(norm_href):
+            raise query_refused
+        tap = self._observe.reserve_tap(norm_href, limit=self._OBSERVE_KEEP, isolate=bool(query))
+        if tap is None:
+            raise ServiceValidationError(
+                translation_domain=DOMAIN,
+                translation_key="observe_in_progress",
+                translation_placeholders={"href": norm_href},
+            )
+        sess = None
+        subscribed = False
+        try:
+            code, rep, body = await self.async_raw_read(norm_href, query)
+            async with self._session_lock:
+                # Decided here, not above: the GET and the lock wait give
+                # the coordinator time to subscribe or drop the href.
+                already_observed = self._observe.coordinator_observes(norm_href)
+                if already_observed and query:
+                    raise query_refused
+
+                def _subscribe():
+                    if self._session is None:
+                        self._connect_session()
+                    live = self._session
+                    if live is None:
+                        raise RuntimeError("no session")
+                    self._observe.start_tap(tap)
+                    if not already_observed:
+                        live.subscribe(path_segs, query=tuple(query))
+                    return live
+
+                try:
+                    sess = await self.hass.async_add_executor_job(_subscribe)
+                except Exception as e:
+                    self._log.warning("debug observe failed for %s: %s", norm_href, e)
+                    raise HomeAssistantError(
+                        translation_domain=DOMAIN,
+                        translation_key="debug_observe_failed",
+                        translation_placeholders={"href": norm_href, "error": str(e)},
+                    ) from e
+                subscribed = not already_observed
+            await asyncio.sleep(duration)
+            session_dropped = self._session is not sess
+        finally:
+            self._observe.release_tap(norm_href, tap)
+            # Also on cancellation: a query-qualified relation left behind
+            # would keep pushing into the cache once nothing isolates it.
+            if subscribed:
+                await self._retire_debug_relation(sess, path_segs, norm_href)
+        started = tap.started or 0.0
+        return {
+            "get": (code, rep, body),
+            "already_observed": already_observed,
+            "session_dropped": session_dropped,
+            "notifications": [(round(at - started, 2), item) for at, item in tap.items],
+            "truncated": tap.dropped > 0,
+        }
+
+    async def _retire_debug_relation(self, sess, path_segs: list[str], href: str) -> None:
+        """Unsubscribe observe_resource's relation, unless its session is gone
+        (the relation went with it) or the coordinator now holds one on the
+        same path, which an unsubscribe would retire too."""
+        async with self._session_lock:
+            if self._session is not sess or self._observe.coordinator_observes(href):
+                return
+            try:
+                await self.hass.async_add_executor_job(sess.unsubscribe, path_segs)
+            except Exception as e:
+                self._log.debug("debug observe: unsubscribe %s failed: %s", href, e)
 
     async def async_raw_write_sequence(
         self,
@@ -2182,7 +3115,10 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         `writes` are already on-the-wire hrefs: subdevice translation
         (canonical -> actual) is services.py's job, not this method's --
         this primitive has no notion of subdevices, same as the original
-        single-write async_raw_write never did.
+        single-write async_raw_write never did. That applies to the *write's
+        own* href only: a batch payload's inner hrefs are never translated
+        by anyone, since which spelling a board accepts inside a batch is
+        itself under test (issue #473).
 
         `async_raw_write` below delegates here with a one-item sequence, so
         its signature/return and tests/test_coordinator_raw_write.py stay
@@ -2205,20 +3141,20 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
         parsed = [_validate_debug_write_item(w) for w in writes]
 
         results: list[dict[str, Any]] = []
-        last_payload_by_href: dict[str, dict] = {}
+        last_payload_by_href: dict[str, dict | list] = {}
         # Exactly one of these is the real lock, never both -- asyncio.Lock
         # isn't reentrant, so nesting the same one would deadlock.
         outer_lock = self._session_lock if hold_session_lock else contextlib.nullcontext()
         try:
             async with outer_lock:
-                for i, (path_segs, href, payload, settle) in enumerate(parsed):
+                for i, (path_segs, href, payload, settle, readback) in enumerate(parsed):
                     per_write_lock = (
                         contextlib.nullcontext() if hold_session_lock else self._session_lock
                     )
                     async with per_write_lock:
                         before = self.resource(href)
-                        code, after = await self.hass.async_add_executor_job(
-                            self._raw_write_blocking, path_segs, payload, href
+                        code, after, response_body = await self.hass.async_add_executor_job(
+                            self._raw_write_blocking, path_segs, payload, href, readback
                         )
                     last_payload_by_href[href] = payload
                     results.append(
@@ -2227,9 +3163,14 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                             "code": _coap_code_str(code),
                             "raw_code": code,
                             "accepted": _coap_accepted(code),
+                            "response_body": response_body,
                             "before": before,
+                            "readback": readback,
                             "after": after,
-                            "changed": all(after.get(k) == v for k, v in payload.items()),
+                            # None, not False, without a readback: nothing
+                            # was compared. Same "couldn't verify" posture
+                            # `held` already takes below.
+                            "changed": _payload_present_in(payload, after) if readback else None,
                         }
                     )
                     # Under the default this wait happens inside the lock, so
@@ -2267,9 +3208,15 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                 for href in dict.fromkeys(r["href"] for r in results):
                     read_error: str | None = None
                     try:
-                        vcode, vrep, _vbody = await self.hass.async_add_executor_job(
+                        vcode, vrep, vbody = await self.hass.async_add_executor_job(
                             self._raw_read_blocking, _href_to_path_segs(href), href
                         )
+                        # A Collection answers a batch list, which
+                        # `_raw_read_blocking` reports as `body` and leaves
+                        # out of `rep` -- one GET of it verifies every
+                        # element the batch named.
+                        if isinstance(vbody, list):
+                            vrep = parse_device0_batch(vbody)
                     except Exception as e:
                         # The write already landed -- see `results` above,
                         # built before this wait ever started. A failed
@@ -2290,17 +3237,28 @@ class LocalThingsCoordinator(DataUpdateCoordinator[dict[str, Any]]):
                     # False, which would report a 4.04 as a revert -- the one
                     # distinction verify_after exists to draw.
                     read_ok = _coap_accepted(vcode) and bool(vrep)
-                    verified[href] = {
+                    last_payload = last_payload_by_href[href]
+                    entry: dict[str, Any] = {
                         "code": _coap_code_str(vcode),
                         "raw_code": vcode,
                         "rep": vrep,
-                        "held": (
-                            all(vrep.get(k) == v for k, v in last_payload_by_href[href].items())
-                            if read_ok
-                            else None
-                        ),
+                        "held": (_payload_present_in(last_payload, vrep) if read_ok else None),
                         "read_error": read_error,
                     }
+                    if isinstance(last_payload, list):
+                        # Which element held, not just whether all of them
+                        # did: a batch whose mode stuck and whose run
+                        # command didn't is the result this whole path
+                        # exists to tell apart from a flat refusal.
+                        entry["elements"] = {
+                            element_href: (
+                                _payload_present_in(rep, vrep.get(element_href) or {})
+                                if read_ok
+                                else None
+                            )
+                            for element_href, rep in _batch_element_reps(last_payload).items()
+                        }
+                    verified[href] = entry
             response["verified"] = verified
 
         # Hasten a summary poll so entities on other resources catch up

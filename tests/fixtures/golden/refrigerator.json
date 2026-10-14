@@ -10,6 +10,7 @@
     "cabinet_light_switch",
     "cooler_setpoint",
     "cooler_temperature",
+    "welcome_lighting_sense_level",
     "day_brightness",
     "defrost_active",
     "defrost_delay",
@@ -27,13 +28,16 @@
     "freezer_setpoint",
     "freezer_temperature",
     "fridge_sound",
+    "ice_night_end",
     "ice_night_mode",
+    "ice_night_start",
     "icemaker_one_enabled",
     "icemaker_one_making_status",
     "icemaker_two_enabled",
     "icemaker_two_making_status",
     "icemaker_two_type",
     "night_end",
+    "night_lighting_schedule",
     "night_start",
     "power_energy_kwh",
     "power_watts",
@@ -43,7 +47,8 @@
     "selfcheck_error",
     "selfcheck_result",
     "selfcheck_status",
-    "welcome_lighting"
+    "welcome_lighting",
+    "welcome_lighting_proximity"
   ],
   "discovery_unique_ids": [
     "samsung_refrigerator_ai_energy_level",
@@ -56,6 +61,7 @@
     "samsung_refrigerator_cabinet_light_switch",
     "samsung_refrigerator_cooler_setpoint",
     "samsung_refrigerator_cooler_temperature",
+    "samsung_refrigerator_welcome_lighting_sense_level",
     "samsung_refrigerator_day_brightness",
     "samsung_refrigerator_defrost_active",
     "samsung_refrigerator_defrost_delay",
@@ -73,13 +79,16 @@
     "samsung_refrigerator_freezer_setpoint",
     "samsung_refrigerator_freezer_temperature",
     "samsung_refrigerator_fridge_sound",
+    "samsung_refrigerator_ice_night_end",
     "samsung_refrigerator_ice_night_mode",
+    "samsung_refrigerator_ice_night_start",
     "samsung_refrigerator_icemaker_one_enabled",
     "samsung_refrigerator_icemaker_one_making_status",
     "samsung_refrigerator_icemaker_two_enabled",
     "samsung_refrigerator_icemaker_two_making_status",
     "samsung_refrigerator_icemaker_two_type",
     "samsung_refrigerator_night_end",
+    "samsung_refrigerator_night_lighting_schedule",
     "samsung_refrigerator_night_start",
     "samsung_refrigerator_power_energy_kwh",
     "samsung_refrigerator_power_watts",
@@ -90,6 +99,7 @@
     "samsung_refrigerator_selfcheck_result",
     "samsung_refrigerator_selfcheck_start",
     "samsung_refrigerator_selfcheck_status",
-    "samsung_refrigerator_welcome_lighting"
+    "samsung_refrigerator_welcome_lighting",
+    "samsung_refrigerator_welcome_lighting_proximity"
   ]
 }

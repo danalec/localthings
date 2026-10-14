@@ -61,6 +61,9 @@
       "door_open": {
         "name": "Door"
       },
+      "filter_blockage": {
+        "name": "Filter blockage"
+      },
       "filter_door_status": {
         "name": "Filter door"
       },
@@ -115,8 +118,47 @@
       "add_wash_indicator": {
         "name": "AddWash ready"
       },
+      "pre_wash_selected": {
+        "name": "Pre-wash selected"
+      },
+      "delay_wash_set": {
+        "name": "Delayed start set"
+      },
       "stick_ble_connected": {
         "name": "Stick BLE connected"
+      },
+      "cooktop_burner": {
+        "name": "Burner {number}"
+      },
+      "beep": {
+        "name": "Beep"
+      },
+      "remind_beep": {
+        "name": "End signal reminder"
+      },
+      "display_time_auto_sync": {
+        "name": "Display time auto sync"
+      },
+      "grease_filter_alarm": {
+        "name": "Grease filter alarm"
+      },
+      "front_vent_open": {
+        "name": "Front vent"
+      },
+      "dual_setpoint_enabled": {
+        "name": "Dual setpoint enabled"
+      },
+      "divider": {
+        "name": "Divider"
+      },
+      "wrinkle_prevent_active": {
+        "name": "Wrinkle prevent active"
+      },
+      "cooktop_sync_control": {
+        "name": "Sync Control"
+      },
+      "cooktop_paused": {
+        "name": "Paused"
       }
     },
     "button": {
@@ -128,6 +170,24 @@
       },
       "auto_clean_stop": {
         "name": "Stop auto clean"
+      },
+      "air_filter_reset": {
+        "name": "Reset air filter"
+      },
+      "air_filter_pm1_reset": {
+        "name": "Reset PM1.0 filter"
+      },
+      "hepa_filter_reset": {
+        "name": "Reset HEPA filter"
+      },
+      "deodor_filter_reset": {
+        "name": "Reset deodorizing filter"
+      },
+      "hood_filter_reset": {
+        "name": "Reset hood filter"
+      },
+      "filter_reset": {
+        "name": "Reset water filter"
       },
       "filter_time_reset": {
         "name": "Reset filter time"
@@ -141,8 +201,14 @@
       "start": {
         "name": "Start"
       },
+      "sync_clock": {
+        "name": "Sync clock"
+      },
       "stop": {
         "name": "Stop"
+      },
+      "start_cooking": {
+        "name": "Start cooking"
       }
     },
     "climate": {
@@ -172,6 +238,12 @@
             }
           }
         }
+      },
+      "zone_climate": {
+        "name": "Zone 1"
+      },
+      "zone2_climate": {
+        "name": "Zone 2"
       }
     },
     "fan": {
@@ -187,6 +259,11 @@
             }
           }
         }
+      }
+    },
+    "light": {
+      "lamp": {
+        "name": "Lamp"
       }
     },
     "number": {
@@ -228,6 +305,15 @@
       }
     },
     "select": {
+      "welcome_lighting_proximity": {
+        "name": "Welcome lighting proximity",
+        "state": {
+          "nearest": "Nearest",
+          "near": "Near",
+          "middle": "Middle",
+          "far": "Far"
+        }
+      },
       "ai_energy_level": {
         "name": "AI Energy Mode level"
       },
@@ -236,6 +322,13 @@
       },
       "auto_door_timer": {
         "name": "Auto door open timer"
+      },
+      "auto_door_mode": {
+        "name": "Auto door open mode",
+        "state": {
+          "easy_open": "Easy open",
+          "wide_open": "Wide open"
+        }
       },
       "beverage_zone_mode": {
         "name": "Beverage zone mode",
@@ -253,7 +346,7 @@
         }
       },
       "cooler_temperature_setpoint": {
-        "name": "Cooler temperature"
+        "name": "Fridge temperature"
       },
       "day_brightness": {
         "name": "Cabinet brightness",
@@ -322,7 +415,8 @@
           "a7": "Heavy",
           "a8": "Express",
           "8c": "Extra Silence",
-          "88": "Self Clean"
+          "88": "Self Clean",
+          "87": "Rinse Only"
         }
       },
       "dispense_type": {
@@ -413,7 +507,27 @@
           "3a": "Hygiene Care",
           "3b": "Bedding/Dust Off",
           "3c": "Activewear",
-          "3d": "Denim"
+          "3d": "Denim",
+          "2f": "Heavy Duty",
+          "30": "Activewear",
+          "32": "Perm Press",
+          "33": "Steam Sanitize+",
+          "34": "Steam Refresh",
+          "35": "Wrinkle Away",
+          "36": "Air Fluff",
+          "3e": "Small Load",
+          "2e": "Eco Normal"
+        }
+      },
+      "dryer_dry_level": {
+        "name": "Dry level",
+        "state": {
+          "none": "Off",
+          "damp": "Damp",
+          "less": "Less",
+          "normal": "Normal",
+          "more": "More",
+          "very": "Very"
         }
       },
       "favorite_capacity": {
@@ -441,6 +555,7 @@
       "flex_zone_mode": {
         "name": "Flex zone mode",
         "state": {
+          "cv_ttype_rf9000a_fridge": "Fridge",
           "cv_ttype_rf9000a_freeze": "Freeze",
           "cv_ttype_rf9000a_softfreeze": "Soft freeze",
           "cv_ttype_rf9000a_meat_fish": "Meat/Fish",
@@ -450,7 +565,10 @@
           "cv_fdr_deli": "Deli",
           "cv_fdr_beverage": "Beverage",
           "cv_fdr_meat": "Meat",
-          "cv_fdr_soft_freezer": "Soft freezer"
+          "cv_fdr_soft_freezer": "Soft freezer",
+          "fconvert_freezer": "Freeze",
+          "fconvert_fridge": "Fridge",
+          "fconvert_off": "Off"
         }
       },
       "heated_dry": {
@@ -516,7 +634,23 @@
           "frozen_pizza_plus": "Frozen Pizza+",
           "slow_cook": "Slow cook",
           "plate_warm": "Plate warm",
-          "air_fry": "Air fry"
+          "air_fry": "Air fry",
+          "convection_roast": "Convection roast",
+          "keep_warm": "Keep warm",
+          "bread_proof": "Bread proof",
+          "dehydrate": "Dehydrate",
+          "self_clean": "Self clean",
+          "air_fryer": "Air fry",
+          "upper_broil": "Upper broil",
+          "upper_convection_bake": "Upper convection bake",
+          "upper_convection_roast": "Upper convection roast",
+          "lower_bake": "Lower bake",
+          "lower_convection_bake": "Lower convection bake",
+          "steam_bake": "Steam bake",
+          "steam_roast": "Steam roast",
+          "upper_steam_bake": "Upper steam bake",
+          "descale": "Descale",
+          "drain": "Drain"
         }
       },
       "operating_mode": {
@@ -561,7 +695,9 @@
         "state": {
           "fdr_wine": "Wine",
           "fdr_deli": "Deli",
-          "fdr_drinks": "Drinks"
+          "fdr_drinks": "Drinks",
+          "ttype_meat_fish": "Meat/Fish",
+          "ttype_rf9000a_fridge": "Fridge"
         }
       },
       "winecellar_pantry_zone_mode": {
@@ -592,6 +728,15 @@
       "rinse_cycles": {
         "name": "Rinse cycles"
       },
+      "laundry_out_time": {
+        "name": "Laundry-out reminder",
+        "state": {
+          "0": "Off",
+          "30": "Every 30 min",
+          "60": "Every 60 min",
+          "90": "Every 90 min"
+        }
+      },
       "sensing_mode": {
         "name": "AI Purify action",
         "state": {
@@ -615,6 +760,17 @@
           "01": "Low",
           "02": "Medium",
           "03": "High"
+        }
+      },
+      "soil_level": {
+        "name": "Soil level",
+        "state": {
+          "none": "None",
+          "extra_light": "Extra light",
+          "light": "Light",
+          "normal": "Normal",
+          "heavy": "Heavy",
+          "extra_heavy": "Extra heavy"
         }
       },
       "sound_mode": {
@@ -650,7 +806,9 @@
           "no_spin": "No spin",
           "low": "Low",
           "medium": "Medium",
-          "high": "High"
+          "high": "High",
+          "extra_low": "Extra low",
+          "extra_high": "Extra high"
         }
       },
       "wash_temperature": {
@@ -661,23 +819,53 @@
           "cool": "Cool",
           "warm": "Warm",
           "hot": "Hot",
-          "extra_hot": "Extra hot"
+          "extra_hot": "Extra hot",
+          "tap_cold": "Tap cold"
         }
       },
       "washer_cycle_table_00": {
         "name": "Cycle",
         "state": {
           "01": "Normal",
-          "70": "Heavy Duty",
           "55": "Whites",
+          "57": "Self Clean+",
+          "5b": "Cotton",
+          "5c": "Extra Speed",
+          "5d": "Super Eco Wash",
+          "5e": "Delicates",
+          "5f": "Baby Care",
+          "60": "Outdoor",
+          "61": "Dark Garment",
+          "63": "Drum Clean",
+          "64": "Rinse + Spin",
+          "65": "Wool",
+          "66": "Bedding",
+          "67": "Synthetics",
+          "68": "E Cotton",
+          "6b": "Spin Only",
+          "6c": "Denim",
+          "70": "Heavy Duty",
           "71": "Bedding",
           "72": "Sanitize",
-          "77": "Perm Press",
-          "57": "Self Clean+",
           "73": "Rinse + Spin",
           "74": "Active Wear",
           "75": "Delicates",
-          "78": "Quick Wash"
+          "77": "Perm Press",
+          "78": "Quick Wash",
+          "ba": "Drain/Spin",
+          "d0": "Cotton",
+          "d1": "E Cotton",
+          "d2": "Synthetics",
+          "d3": "Delicates",
+          "d4": "Rinse + Spin",
+          "d5": "Drum Clean",
+          "d6": "Bedding",
+          "d7": "Outdoor Care",
+          "d8": "Wool",
+          "da": "Super Eco Wash",
+          "db": "Super Speed",
+          "dc": "15' Quick Wash",
+          "e4": "Anti Allergen"
         }
       },
       "washer_cycle_table_02": {
@@ -739,13 +927,18 @@
           "38": "Cotton Dry",
           "39": "Synthetics Dry",
           "3a": "Drum Clean",
+          "51": "Super Speed",
           "52": "Eco Cold",
           "53": "Heavy Duty",
           "54": "Towels",
           "55": "Activewear",
-          "57": "Delicate",
+          "56": "Bedding",
+          "57": "Delicates",
+          "5a": "Steam Sanitize",
+          "5b": "Small Load",
           "5e": "Rinse+Spin",
           "60": "Self Clean+",
+          "64": "Steam Whites",
           "65": "Colors",
           "66": "Denim",
           "69": "AI Wash",
@@ -769,13 +962,23 @@
           "7d": "Bedding/Waterproof",
           "7e": "Self-Clean",
           "7f": "Wool/Delicate",
+          "85": "Steam Normal",
           "86": "Deep Wash",
           "87": "Download",
           "88": "Pet Care",
+          "8b": "Quick Wash",
+          "8c": "AI OptiWash",
           "8f": "Intense Cold",
           "96": "Less Microfiber",
           "a0": "15' Quick Wash",
-          "b0": "Mixed Load"
+          "b0": "Mixed Load",
+          "58": "Wool",
+          "5c": "Outdoor",
+          "5d": "Power Rinse",
+          "5f": "Spin Only",
+          "63": "Power Steam",
+          "67": "Steam Allergen",
+          "68": "Steam Bulky"
         }
       },
       "washer_dry_level": {
@@ -845,11 +1048,93 @@
         "state": {
           "purification": "Purification",
           "ventilation": "Ventilation",
-          "smartventilation": "Smart Ventilation"
+          "smartventilation": "Smart Ventilation",
+          "aicomfort": "AI Comfort",
+          "autoventilation": "Auto ventilation",
+          "freshairintake": "Fresh air intake",
+          "indoorpurification": "Indoor purification",
+          "indoordehumidification": "Indoor dehumidification"
+        }
+      },
+      "dry_time": {
+        "name": "Dry time"
+      },
+      "booster_fan_mode": {
+        "name": "Booster fan mode",
+        "state": {
+          "off": "Off",
+          "auto": "Auto",
+          "high": "High",
+          "medium": "Medium"
+        }
+      },
+      "booster_light_color_temperature": {
+        "name": "Booster light color temperature",
+        "state": {
+          "3000k": "3000 K",
+          "4000k": "4000 K",
+          "6500k": "6500 K"
+        }
+      },
+      "booster_light_brightness": {
+        "name": "Booster light brightness",
+        "state": {
+          "smart": "Smart",
+          "high": "High",
+          "low": "Low"
+        }
+      },
+      "booster_oscillation_angle": {
+        "name": "Booster oscillation angle",
+        "state": {
+          "normal": "Normal",
+          "circulation": "Circulation",
+          "right_narrow": "Right narrow",
+          "right_wide": "Right wide",
+          "left_narrow": "Left narrow",
+          "left_wide": "Left wide"
+        }
+      },
+      "ai_motion_wind": {
+        "name": "AI Motion Wind",
+        "state": {
+          "off": "Off",
+          "surround": "Surround",
+          "longreach": "Long reach",
+          "down": "Down",
+          "power": "Power",
+          "windfree": "Wind-Free",
+          "aidirect": "AI direct",
+          "aiindirect": "AI indirect"
+        }
+      },
+      "wash_zone": {
+        "name": "Wash zone",
+        "state": {
+          "on_on": "Both racks",
+          "off_on": "Lower rack only",
+          "on_off": "Upper rack only"
+        }
+      },
+      "lamp_level": {
+        "name": "Lamp level",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "high": "High"
         }
       }
     },
     "sensor": {
+      "welcome_lighting_sense_level": {
+        "name": "Welcome lighting sense level",
+        "state": {
+          "nearest": "Nearest",
+          "near": "Near",
+          "middle": "Middle",
+          "far": "Far"
+        }
+      },
       "auto_clean_progress": {
         "name": "Auto clean progress"
       },
@@ -885,6 +1170,9 @@
       },
       "burner_state": {
         "name": "Burner {number} state"
+      },
+      "burner_power_level": {
+        "name": "Burner {number} power level"
       },
       "clean_level": {
         "name": "Clean level"
@@ -987,6 +1275,12 @@
       "current_temp_c": {
         "name": "Temperature"
       },
+      "food_probe_temp": {
+        "name": "Food probe"
+      },
+      "food_probe_setpoint": {
+        "name": "Food probe target"
+      },
       "current_temperature_c": {
         "name": "Temperature"
       },
@@ -1008,16 +1302,19 @@
       "drum_clean_last_cleaned": {
         "name": "Drum last cleaned"
       },
-      "dry_level": {
-        "name": "Dry level"
-      },
-      "dry_time": {
-        "name": "Dry time"
+      "quick_wash": {
+        "name": "Quick wash",
+        "state": {
+          "not_used": "Not available",
+          "off": "Off",
+          "on": "On"
+        }
       },
       "dryer_type": {
         "name": "Dryer type",
         "state": {
-          "electricity": "Electricity"
+          "electricity": "Electricity",
+          "gas": "Gas"
         }
       },
       "dust": {
@@ -1025,6 +1322,9 @@
       },
       "energy_kwh": {
         "name": "Energy"
+      },
+      "usage_runtime_hours": {
+        "name": "Running time"
       },
       "energy_last_month_kwh": {
         "name": "Energy (last month)"
@@ -1150,6 +1450,7 @@
         "name": "Progress",
         "state": {
           "idle": "Idle",
+          "delaywash": "Delayed start",
           "weightsensing": "Weight sensing",
           "wash": "Washing",
           "rinse": "Rinsing",
@@ -1236,6 +1537,9 @@
       "zone_temperature": {
         "name": "Zone temperature"
       },
+      "zone2_temperature": {
+        "name": "Zone 2 temperature"
+      },
       "watertank_full_alarm_status": {
         "name": "Water tank full alarm status"
       },
@@ -1244,9 +1548,90 @@
       },
       "air_filter_pm1_usage_hours": {
         "name": "PM1 filter usage hours"
+      },
+      "active_burners": {
+        "name": "Active burners"
+      },
+      "cooktop_monitoring": {
+        "name": "Cooktop monitoring"
+      },
+      "booster_angle_location": {
+        "name": "Booster angle position"
+      },
+      "cooking_mode": {
+        "name": "Cooking mode",
+        "state": {
+          "no_operation": "No operation",
+          "micro_wave": "Microwave",
+          "autocook": "Auto cook",
+          "keep_warm": "Keep warm"
+        }
+      },
+      "cook_time": {
+        "name": "Cook time"
+      },
+      "cook_time_remaining": {
+        "name": "Cook time remaining"
+      },
+      "cook_finish_time": {
+        "name": "Cook finish time"
+      },
+      "sub_operation": {
+        "name": "Sub-operation"
+      },
+      "hood_fan_speed": {
+        "name": "Fan speed",
+        "state": {
+          "off": "Off",
+          "low": "Low",
+          "medium": "Medium",
+          "high": "High",
+          "boost": "Boost"
+        }
+      },
+      "hood_lamp": {
+        "name": "Lamp",
+        "state": {
+          "off": "Off",
+          "medium": "Medium",
+          "on": "On"
+        }
+      },
+      "dual_setpoint_cooling": {
+        "name": "Dual setpoint cooling"
+      },
+      "dual_setpoint_heating": {
+        "name": "Dual setpoint heating"
+      },
+      "auto_changeover_cool_primary_offset": {
+        "name": "Auto changeover cooling primary offset"
+      },
+      "auto_changeover_cool_secondary_offset": {
+        "name": "Auto changeover cooling secondary offset"
+      },
+      "auto_changeover_heat_primary_offset": {
+        "name": "Auto changeover heating primary offset"
+      },
+      "auto_changeover_heat_secondary_offset": {
+        "name": "Auto changeover heating secondary offset"
+      },
+      "cooktop_device_type": {
+        "name": "Device type code"
+      },
+      "cooktop_flex_coil": {
+        "name": "Flex coil code"
+      },
+      "main_timer_set": {
+        "name": "Main timer setting"
+      },
+      "burner_pan_size": {
+        "name": "Burner {number} pan size"
       }
     },
     "switch": {
+      "night_lighting_schedule": {
+        "name": "Night lighting schedule"
+      },
       "ai_energy_level": {
         "name": "AI Energy Mode"
       },
@@ -1364,6 +1749,9 @@
       "ice_night_mode": {
         "name": "Nighttime ice quiet mode"
       },
+      "ai_precise_cooling": {
+        "name": "AI precise cooling"
+      },
       "instance_enabled": {
         "name": "{instance_name} enabled"
       },
@@ -1424,6 +1812,9 @@
       "sound": {
         "name": "Sound"
       },
+      "station_light": {
+        "name": "Station light"
+      },
       "storm_wash": {
         "name": "Storm Wash+"
       },
@@ -1459,9 +1850,42 @@
       },
       "windsleep": {
         "name": "Sleep mode"
+      },
+      "auto_detergent": {
+        "name": "Auto detergent"
+      },
+      "auto_softener": {
+        "name": "Auto softener"
+      },
+      "booster_light": {
+        "name": "Booster light"
+      },
+      "booster_light_manual_brightness": {
+        "name": "Booster manual brightness"
+      },
+      "booster_oscillation": {
+        "name": "Booster oscillation"
+      },
+      "auto_changeover": {
+        "name": "Auto changeover"
+      },
+      "interlock": {
+        "name": "Interlock"
+      },
+      "speed_booster": {
+        "name": "Speed Booster"
+      },
+      "damp_alert": {
+        "name": "Damp alert"
+      },
+      "extra_rinse": {
+        "name": "Extra rinse"
       }
     },
     "time": {
+      "delay_finish_at": {
+        "name": "Finish by"
+      },
       "dnd_end": {
         "name": "Do not disturb end"
       },
@@ -1473,6 +1897,12 @@
       },
       "led_night_start": {
         "name": "Door LED night start"
+      },
+      "ice_night_end": {
+        "name": "Nighttime ice quiet mode end"
+      },
+      "ice_night_start": {
+        "name": "Nighttime ice quiet mode start"
       },
       "night_end": {
         "name": "Night light end"
@@ -1497,16 +1927,12 @@
     "step": {
       "user": {
         "title": "Add Samsung appliance",
-        "description": "Enter the IP address of your Samsung appliance and the AC14K_M CA credentials used to mint device certificates.",
+        "description": "Enter the IP address of your Samsung appliance. LocalThings sets it up automatically with a self-signed certificate — most appliances need nothing else.",
         "data": {
-          "host": "IP address",
-          "ca_cert_pem": "CA certificate (PEM)",
-          "ca_key_pem": "CA private key (PEM)"
+          "host": "IP address"
         },
         "data_description": {
-          "host": "Local IP address of your Samsung appliance (e.g. 192.168.1.50).",
-          "ca_cert_pem": "The PEM-encoded AC14K_M CA certificate chain. Paste the full contents of your fullchain PEM including all BEGIN/END CERTIFICATE blocks.",
-          "ca_key_pem": "The PEM-encoded AC14K_M private key. Paste the full contents including the BEGIN/END PRIVATE KEY header and footer."
+          "host": "Local IP address of your Samsung appliance (e.g. 192.168.1.50)."
         }
       },
       "user_reuse": {
@@ -1519,26 +1945,133 @@
           "host": "Local IP address of your Samsung appliance (e.g. 192.168.1.50)."
         }
       },
+      "credential": {
+        "title": "Certificate refused",
+        "description": "{host} refused the automatic certificate. Some appliances take a pre-shared key instead of a certificate. LocalThings can't obtain that key itself, so import one you already hold. An AC14K_M CA certificate is also offered, but no appliance that refused the automatic certificate has been reported to accept one.\n\nAppliances that use a pre-shared key are ones we're still working to understand, and you're likely to run into problems with them. Our plan, what we've found so far, and a place to leave feedback are in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Import an owner pre-shared key",
+          "psk_peer": "Import a peer pre-shared key",
+          "fallback_ca": "Try an AC14K_M CA certificate"
+        }
+      },
+      "credential_psk": {
+        "title": "This appliance likely uses a pre-shared key",
+        "description": "{host} refused the automatic certificate, and its unencrypted security metadata says it authenticates with a pre-shared key instead. LocalThings can't obtain that key itself, so import one you already hold. An AC14K_M CA certificate is also offered, but no appliance that refused the automatic certificate has been reported to accept one.\n\nAppliances that use a pre-shared key are ones we're still working to understand, and you're likely to run into problems with them. Our plan, what we've found so far, and a place to leave feedback are in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Import an owner pre-shared key",
+          "psk_peer": "Import a peer pre-shared key",
+          "fallback_ca": "Try an AC14K_M CA certificate"
+        }
+      },
+      "ca_rejected": {
+        "title": "Certificate still refused",
+        "description": "{host} also refused the certificate signed by that CA. That matches every report so far: no appliance that refused the automatic certificate has accepted an AC14K_M CA. It may take a pre-shared key instead. The Home Assistant log records the exact alert.\n\nAppliances that use a pre-shared key are ones we're still working to understand, and you're likely to run into problems with them. Our plan, what we've found so far, and a place to leave feedback are in [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Import an owner pre-shared key",
+          "psk_peer": "Import a peer pre-shared key",
+          "fallback_ca": "Enter the CA again"
+        }
+      },
+      "fallback_ca": {
+        "title": "AC14K_M CA certificate",
+        "description": "Paste the AC14K_M CA certificate and private key. LocalThings signs a device certificate for {host} with them.",
+        "data": {
+          "ca_cert_pem": "CA certificate (PEM)",
+          "ca_key_pem": "CA private key (PEM)"
+        },
+        "data_description": {
+          "ca_cert_pem": "The PEM-encoded AC14K_M CA certificate chain. Paste the full contents of your fullchain PEM including all BEGIN/END CERTIFICATE blocks.",
+          "ca_key_pem": "The PEM-encoded AC14K_M private key. Paste the full contents including the BEGIN/END PRIVATE KEY header and footer."
+        }
+      },
+      "psk_owner": {
+        "title": "Owner pre-shared key",
+        "description": "Enter the owner pre-shared key held for {host}. The identity is the OCF owner UUID, filled in when the appliance reports one. LocalThings checks the key against the appliance, and records which appliance answered, before adding it.\n\nAppliances that use a pre-shared key are ones we're still working to understand, and you're likely to run into problems with them. Our plan, what we've found so far, and a place to leave feedback are in [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identity (owner UUID)",
+          "psk_key": "Key"
+        },
+        "data_description": {
+          "psk_key": "32 or 64 hexadecimal characters."
+        }
+      },
+      "psk_peer": {
+        "title": "Peer pre-shared key",
+        "description": "Enter the pairwise peer credential installed on {host} alongside Samsung's ownership, exactly as the tool that installed it reported. Neither the identity nor the key can be read from the appliance. LocalThings checks the key against the appliance, and records which appliance answered, before adding it.\n\nAppliances that use a pre-shared key are ones we're still working to understand, and you're likely to run into problems with them. Our plan, what we've found so far, and a place to leave feedback are in [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identity (peer UUID)",
+          "psk_key": "Key"
+        },
+        "data_description": {
+          "psk_key": "32 or 64 hexadecimal characters."
+        }
+      },
+      "reconfigure": {
+        "title": "Change appliance address",
+        "description": "Enter the appliance's current IP address. Everything else about this device stays as it is — its entities, history and automations are kept.",
+        "data": {
+          "host": "IP address"
+        },
+        "data_description": {
+          "host": "Local IP address of your Samsung appliance (e.g. 192.168.1.50)."
+        }
+      },
       "confirm_unknown_type": {
         "title": "Appliance type not recognized",
         "description": "This appliance reported model \"{model}\", which isn't a type LocalThings recognizes yet. It'll still be added, but only with common capabilities (power, alarms, etc. where present) rather than the full set for its family. You can help add full support afterward by downloading diagnostics for this device (Settings > Devices & Services > this device > the menu > Download diagnostics) and filing them in a new issue. Submit to add it anyway."
+      },
+      "legacy_token": {
+        "title": "Device token",
+        "description": "This appliance ({host}) uses Samsung's older local API, which needs a device token as well as the certificate.\n\nLeave this empty and submit to have the appliance issue one: it will be asked for a token and will send it back to Home Assistant on port 8889. Switch Remote Control (Smart Control) on at the appliance first, with the door closed, or it drops off Wi-Fi within minutes and never answers. This takes up to a minute and a half.\n\nIf the appliance cannot reach Home Assistant on port 8889, obtain a token another way and paste it here instead.",
+        "data": {
+          "device_token": "Device token (leave empty to request one)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Device token rejected",
+        "description": "{host} no longer accepts its device token. Leave this empty and submit to have the appliance issue a new one (Remote Control on, door closed, and port 8889 reachable on Home Assistant), or paste a token you obtained another way.",
+        "data": {
+          "device_token": "Device token (leave empty to request one)"
+        }
       }
     },
     "error": {
       "no_response": "No response from that IP address — nothing came back on any port in the appliance's local API range (UDP 49152-49160). Check the IP address is correct, the appliance is powered on and on the same network as Home Assistant, and that no firewall is dropping UDP traffic to it.",
-      "ports_closed": "That IP address is reachable, but it actively refused every port in the local API range (UDP 49152-49160). Either it isn't a Samsung appliance, or it's on older firmware that only talks to Samsung's cloud over TCP 8888, which this integration can't use.",
+      "ports_closed": "That IP address is reachable, but it actively refused every port in the local API range (UDP 49152-49160) and answered nothing on the discovery channel. It is most likely not a Samsung appliance, or not one with the local API enabled.",
       "no_dtls_server": "Ports in the local API range are reachable at that address, but nothing there answered a DTLS handshake. Check that the IP address belongs to the appliance and not another device on your network.",
-      "handshake_timeout": "The appliance answered on its local API port but never finished the DTLS handshake. It is usually still holding the session from a previous attempt — wait about a minute and try again.",
+      "appliance_no_dtls": "That address is a Samsung appliance — it identified itself as {model} over the unencrypted discovery channel and advertised its secure port as {port} — but it never completed a DTLS handshake there. The address is not the problem. Check whether the appliance has Remote Control or a similar setting switched off at its panel, and see the Home Assistant log for the exact failure.",
+      "non_appliance_stack": "Something at that IP address answered, but it identified itself as an OCF service that isn't an appliance. Some Samsung appliances run one alongside their own, and LocalThings can only find the appliance behind it when Home Assistant is on the same network segment. Put Home Assistant and the appliance on the same subnet and VLAN, then try again.",
+      "multiple_appliances": "More than one Samsung appliance answers at that IP address, and LocalThings can't yet choose between them. Please report it on the LocalThings issue tracker and include the Home Assistant log.",
+      "handshake_timeout": "The appliance answered on its local API port but never finished the DTLS handshake, even after a retry. Try again. If it keeps failing, restarting the appliance clears the connections it is still holding; the Home Assistant log has the exact failure.",
       "cert_rejected": "The appliance rejected the certificate. The CA certificate and key are most likely not the AC14K_M CA this appliance trusts, or they don't pair. The Home Assistant log records the exact alert the appliance sent.",
+      "psk_rejected": "The appliance refused the pre-shared key. The identity or key is wrong, or it belongs to another appliance or to an owner that has since changed. The Home Assistant log records the exact alert.",
+      "identity_unproven": "The key worked, but the appliance didn't report its OCF device ID over the encrypted connection, so LocalThings can't confirm which appliance holds the key and won't add it. Try again while the appliance is awake. If it keeps happening, tell us in [issue #435]({issue_url}) and include the Home Assistant log.",
+      "invalid_psk_identity": "Enter the identity as a UUID, for example 12345678-1234-1234-1234-123456789abc.",
+      "psk_identity_zero_byte": "This UUID contains a zero byte that the installed transport cannot send. Keep the recovered identity unchanged.",
+      "invalid_psk_key": "Enter the key as 32 or 64 hexadecimal characters.",
       "handshake_failed": "The appliance refused the DTLS handshake for a reason unrelated to the certificate, most likely a protocol or cipher mismatch. The Home Assistant log records the exact alert it sent.",
       "cloud_unreachable": "Couldn't reach Samsung's cloud gateway to fetch the UUID needed to mint this device's certificate. Check Home Assistant's internet access and try again.",
       "unexpected_response": "Connected to the device successfully, but it didn't return a usable device description. It may not be an appliance this integration supports. The Home Assistant log records what it sent.",
-      "cannot_connect": "Cannot connect to the device. Verify the IP address is reachable and the CA credentials are correct.",
+      "cannot_connect": "Cannot connect to the device. Check that the IP address is correct and the appliance is switched on and connected to your network.",
       "invalid_ca": "The CA certificate or private key could not be loaded. Verify the PEM contents are correct and the key matches the certificate.",
-      "unknown": "Unexpected error. Check the Home Assistant logs for details."
+      "unknown": "Unexpected error. Check the Home Assistant logs for details.",
+      "wrong_device": "A Samsung appliance answered at that address, but it isn't this one — it reported a different identity. Check the address belongs to this appliance. To add the other one, use Add device instead.",
+      "token_not_received": "No device token arrived. Check that Remote Control is on at the appliance with the door closed, and that it can reach Home Assistant on port 8889 - or paste a token you obtained another way.",
+      "invalid_token": "The appliance rejected that device token. Leave the field empty to request a new one.",
+      "callback_port_in_use": "Port 8889 is already in use on Home Assistant, usually by a token request still waiting. Try again in a minute and a half.",
+      "callback_cert_rejected": "The appliance called back on port 8889 but refused Home Assistant's self-signed certificate. Paste the AC14K_M CA certificate and key so LocalThings can sign one it accepts; the token request then runs again.",
+      "callback_ca_rejected": "The appliance called back on port 8889 but refused the AC14K_M-signed certificate too. Paste a token you obtained another way, and see the Home Assistant log for the handshake error."
     },
     "abort": {
-      "already_configured": "Device is already configured"
+      "already_configured": "Device is already configured",
+      "already_in_progress": "Configuration flow is already in progress",
+      "reconfigure_successful": "Address updated",
+      "no_entry_for_mac": "No configured appliance stores that MAC address",
+      "reauth_successful": "The new device token works; the appliance is reconnecting.",
+      "reauth_unsupported": "This appliance has no credential to renew here. If it stopped answering, remove and re-add it."
+    },
+    "progress": {
+      "legacy_token": "Waiting for {host} to send a device token to Home Assistant on port 8889. This takes up to a minute and a half."
     }
   },
   "options": {
@@ -1650,8 +2183,17 @@
     "remote_control_disabled": {
       "message": "Remote control is turned off on this device. Check your appliance's manual for how to enable remote control before Home Assistant can control it."
     },
+    "oven_mode_idle_not_selectable": {
+      "message": "NoOperation is what the oven reports while idle. It can't be selected as a mode; cancel the cook on the oven's panel instead."
+    },
     "debug_payload_empty": {
       "message": "Debug write payload must be a non-empty object."
+    },
+    "debug_batch_too_many_elements": {
+      "message": "A batch payload must have between 1 and {max} elements."
+    },
+    "debug_batch_element_invalid": {
+      "message": "Each batch element must be an object with an href, and a rep that is an object if present."
     },
     "resource_href_required": {
       "message": "A resource href is required."
@@ -1668,8 +2210,29 @@
     "command_failed": {
       "message": "The command to {href} failed even after reconnecting: {error}"
     },
+    "command_refused": {
+      "message": "The appliance refused the command to {href}: {error}"
+    },
+    "command_not_confirmed": {
+      "message": "The command to {href} was sent with Remote Control off, but the appliance doesn't show it yet. If it doesn't follow, turn on Remote Control at the appliance."
+    },
     "debug_read_failed": {
       "message": "The read from {href} failed: {error}"
+    },
+    "observe_duration_out_of_range": {
+      "message": "Duration must be more than 0 and at most {max} seconds."
+    },
+    "observe_not_supported": {
+      "message": "This appliance's interface doesn't support observing resources."
+    },
+    "observe_query_while_observed": {
+      "message": "{href} is already observed by this integration, so it can't be observed again with a query."
+    },
+    "observe_in_progress": {
+      "message": "{href} is already being observed by another call. Wait for it to finish."
+    },
+    "debug_observe_failed": {
+      "message": "Observing {href} failed: {error}"
     },
     "debug_too_many_writes": {
       "message": "Provide between 1 and 10 writes."
@@ -1688,6 +2251,69 @@
     },
     "service_device_not_loaded": {
       "message": "This device isn't connected yet. Try again once it has loaded."
+    },
+    "cook_start_not_supported": {
+      "message": "This appliance doesn't report any cooking mode a remote may start, so it can't be started from Home Assistant."
+    },
+    "cook_start_not_idle": {
+      "message": "The appliance is already cooking. Stop it first, or change the setpoint and cook time while it runs."
+    },
+    "cook_mode_required": {
+      "message": "Choose a cooking mode first. This appliance can be started in: {startable}."
+    },
+    "cook_mode_not_startable": {
+      "message": "{mode} can't be started remotely on this appliance. It can be started in: {startable}."
+    },
+    "cook_mode_unavailable": {
+      "message": "{mode} isn't available on this cavity right now. It can start: {startable}."
+    },
+    "cook_temperature_not_supported": {
+      "message": "{mode} doesn't take a temperature."
+    },
+    "cook_temperature_required": {
+      "message": "{mode} needs a temperature."
+    },
+    "cook_temperature_not_a_choice": {
+      "message": "{mode} only takes {choices}."
+    },
+    "cook_temperature_out_of_range": {
+      "message": "{mode} takes a temperature from {min} to {max}."
+    },
+    "cook_duration_not_supported": {
+      "message": "{mode} doesn't take a cook time."
+    },
+    "cook_duration_required": {
+      "message": "{mode} needs a cook time."
+    },
+    "cook_duration_out_of_range": {
+      "message": "{mode} takes a cook time from {min} to {max}."
+    },
+    "extra_rinse_unavailable_for_cycle": {
+      "message": "Extra Rinse isn't available on the selected cycle."
+    }
+  },
+  "selector": {
+    "instance_name": {
+      "options": {
+        "freezer": "Freezer",
+        "cooler": "Fridge",
+        "top": "Top compartment",
+        "middle": "Middle compartment",
+        "bottom": "Bottom compartment",
+        "onedoor": "Kimchi compartment",
+        "winecellar_top": "Top wine zone",
+        "winecellar_bottom": "Bottom wine zone",
+        "door_freezer": "Freezer door",
+        "door_cooler": "Fridge door",
+        "door_cvroom": "Flex zone door",
+        "door_winecellar": "Wine cellar door",
+        "door_onedoorfreezer": "Main door",
+        "door_onedoorkimchi": "Main door",
+        "ice_maker": "Ice maker",
+        "cubed_ice": "Cubed ice",
+        "ice_bites": "Ice Bites",
+        "whiskey_ice_ball": "Ice balls"
+      }
     }
   }
 }

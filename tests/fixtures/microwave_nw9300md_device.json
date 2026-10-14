@@ -1,0 +1,591 @@
+{
+  "device0": [
+    {
+      "rt": [
+        "x.com.samsung.devcol",
+        "oic.wk.col"
+      ],
+      "if": [
+        "oic.if.baseline",
+        "oic.if.ll",
+        "oic.if.b"
+      ]
+    },
+    {
+      "href": "/configuration/vs/0",
+      "rep": {}
+    },
+    {
+      "href": "/connected/vs/0",
+      "rep": {
+        "x.com.samsung.da.connected": "On",
+        "rt": [
+          "x.com.samsung.da.connected"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.s"
+        ]
+      }
+    },
+    {
+      "href": "/doors/vs/0",
+      "rep": {
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Door",
+            "x.com.samsung.da.openState": "Close"
+          }
+        ],
+        "rt": [
+          "x.com.samsung.da.doors"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.s"
+        ]
+      }
+    },
+    {
+      "href": "/information/vs/0",
+      "rep": {
+        "x.com.samsung.da.modelNum": "TP2X_DA-KS-OVEN-000001|40441741|5002011E0211111D0100000000000000",
+        "x.com.samsung.da.description": "NW9300MD/AA1",
+        "x.com.samsung.da.serialNum": "**REDACTED**",
+        "x.com.samsung.da.otnDUID": "**REDACTED**",
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Version",
+            "x.com.samsung.da.type": "Software",
+            "x.com.samsung.da.number": "240205",
+            "x.com.samsung.da.newVersionAvailable": "0"
+          },
+          {
+            "x.com.samsung.da.id": "1",
+            "x.com.samsung.da.description": "Version",
+            "x.com.samsung.da.type": "Firmware",
+            "x.com.samsung.da.number": "DE92-04417A_20081800, DE92-04077A_17010400",
+            "x.com.samsung.da.newVersionAvailable": "0"
+          }
+        ],
+        "x.com.samsung.da.diagProtocolType": "WIFI_HTTPS",
+        "x.com.samsung.da.diagLogType": [
+          "errCode",
+          "dump"
+        ],
+        "x.com.samsung.da.diagDumpType": "file",
+        "x.com.samsung.da.diagEndPoint": "SSM",
+        "x.com.samsung.da.diagMnid": "0AJT",
+        "x.com.samsung.da.diagSetupid": "610",
+        "x.com.samsung.da.diagMinVersion": "1.0"
+      }
+    },
+    {
+      "href": "/kidslock/vs/0",
+      "rep": {
+        "x.com.samsung.da.kidsLock": "Ready"
+      }
+    },
+    {
+      "href": "/mode/vs/0",
+      "rep": {
+        "x.com.samsung.da.supportedModes": [
+          "MicroWave",
+          "SpeedBroil",
+          "BroilS",
+          "Autocook",
+          "NoOperation",
+          "Convection",
+          "SpeedConvection"
+        ],
+        "x.com.samsung.da.modes": [
+          "NoOperation"
+        ],
+        "x.com.samsung.da.options": [
+          "DeviceType_NW9300MD/AA1",
+          "keepWarmReservation_Off",
+          "NoPreheat_Off",
+          "Sound_On",
+          "AdjustingTemp_15",
+          "Sabbath_Off",
+          "EnergySaving_On"
+        ],
+        "rt": [
+          "x.com.samsung.da.mode"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.a"
+        ]
+      }
+    },
+    {
+      "href": "/operational/state/vs/0",
+      "rep": {
+        "x.com.samsung.da.state": "Ready",
+        "x.com.samsung.da.operationTime": "00:00:00",
+        "x.com.samsung.da.remainingTime": "00:00:00",
+        "x.com.samsung.da.progressPercentage": "1",
+        "rt": [
+          "x.com.samsung.da.operation"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.a"
+        ]
+      }
+    },
+    {
+      "href": "/otninformation/vs/0",
+      "rep": {
+        "x.com.samsung.da.target": "",
+        "x.com.samsung.da.newVersionAvailable": "false"
+      }
+    },
+    {
+      "href": "/alarms/vs/0",
+      "rep": {
+        "rt": [
+          "x.com.samsung.da.alarms"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.s"
+        ],
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Alarm",
+            "x.com.samsung.da.alarmType": "Device",
+            "x.com.samsung.da.code": "OV_E_OFF",
+            "x.com.samsung.da.triggeredTime": "2026-09-26T17:12:37"
+          }
+        ]
+      }
+    },
+    {
+      "href": "/oven/vs/0",
+      "rep": {
+        "x.com.samsung.da.state": "Ready",
+        "x.com.samsung.da.recipe": "00000000000000",
+        "x.com.samsung.da.powerLevel": "0",
+        "rt": [
+          "x.com.samsung.da.oven"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.s"
+        ]
+      }
+    },
+    {
+      "href": "/power/vs/0",
+      "rep": {
+        "x.com.samsung.da.power": "On",
+        "rt": [
+          "x.com.samsung.da.operation"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.s"
+        ]
+      }
+    },
+    {
+      "href": "/temperatures/vs/0",
+      "rep": {
+        "x.com.samsung.da.items": [
+          {
+            "x.com.samsung.da.id": "0",
+            "x.com.samsung.da.description": "Temperature",
+            "x.com.samsung.da.desired": "0",
+            "x.com.samsung.da.current": "0",
+            "x.com.samsung.da.increment": "0",
+            "x.com.samsung.da.unit": "Fahrenheit"
+          }
+        ],
+        "rt": [
+          "x.com.samsung.da.temperatures"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.a"
+        ]
+      }
+    },
+    {
+      "href": "/diagnosis/vs/0",
+      "rep": {
+        "x.com.samsung.da.diagnosisStart": "Ready"
+      }
+    }
+  ],
+  "oic_res": [
+    {
+      "di": "**REDACTED**",
+      "links": [
+        {
+          "href": "/oic/sec/doxm",
+          "rt": [
+            "oic.r.doxm"
+          ],
+          "if": [
+            "oic.if.baseline"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/oic/sec/pstat",
+          "rt": [
+            "oic.r.pstat"
+          ],
+          "if": [
+            "oic.if.baseline"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/oic/d",
+          "rt": [
+            "oic.wk.d",
+            "oic.d.oven"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.r"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": false,
+            "x.org.iotivity.tcp": 0
+          }
+        },
+        {
+          "href": "/oic/p",
+          "rt": [
+            "oic.wk.p"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.r"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": false,
+            "x.org.iotivity.tcp": 0
+          }
+        },
+        {
+          "href": "/EasySetupResURI",
+          "rt": [
+            "oic.r.easysetup"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.ll",
+            "oic.if.b"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/WiFiConfResURI",
+          "rt": [
+            "oic.wk.wifi"
+          ],
+          "if": [
+            "oic.if.baseline"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/CoapCloudConfResURI",
+          "rt": [
+            "oic.wk.cloudserver"
+          ],
+          "if": [
+            "oic.if.baseline"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/DevConfResURI",
+          "rt": [
+            "oic.wk.devconf"
+          ],
+          "if": [
+            "oic.if.baseline"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": true,
+            "port": 49155,
+            "x.org.iotivity.tls": 49153
+          }
+        },
+        {
+          "href": "/sec/provisioninginfo",
+          "rt": [
+            "x.com.samsung.provisioninginfo"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.a"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": false,
+            "x.org.iotivity.tcp": 0
+          }
+        },
+        {
+          "href": "/sec/accesspointlist",
+          "rt": [
+            "x.com.samsung.accesspointlist"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ],
+          "p": {
+            "bm": 1,
+            "sec": false,
+            "x.org.iotivity.tcp": 0
+          }
+        }
+      ]
+    }
+  ],
+  "seeds": {
+    "/device/2": [
+      {
+        "rt": [
+          "x.com.samsung.devcol",
+          "oic.wk.col"
+        ],
+        "if": [
+          "oic.if.baseline",
+          "oic.if.ll",
+          "oic.if.b"
+        ]
+      },
+      {
+        "href": "/configuration/vs/2",
+        "rep": {}
+      },
+      {
+        "href": "/connected/vs/2",
+        "rep": {
+          "x.com.samsung.da.connected": "On",
+          "rt": [
+            "x.com.samsung.da.connected"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ]
+        }
+      },
+      {
+        "href": "/doors/vs/2",
+        "rep": {
+          "x.com.samsung.da.items": [
+            {
+              "x.com.samsung.da.id": "0",
+              "x.com.samsung.da.description": "Door",
+              "x.com.samsung.da.openState": "Close",
+              "x.com.samsung.da.lock": "Unlock"
+            }
+          ],
+          "rt": [
+            "x.com.samsung.da.doors"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ]
+        }
+      },
+      {
+        "href": "/mode/vs/2",
+        "rep": {
+          "x.com.samsung.da.supportedModes": [
+            "ConvectionBake",
+            "ConvectionRoast",
+            "Bake",
+            "Broil",
+            "SteamBake",
+            "SteamRoast",
+            "Easycook3",
+            "Descale",
+            "PyroFree",
+            "Drain",
+            "SelfClean",
+            "NoOperation"
+          ],
+          "x.com.samsung.da.modes": [
+            "NoOperation"
+          ],
+          "x.com.samsung.da.options": [
+            "keepWarmReservation_Off",
+            "meatprobe_disconnected",
+            "NoPreheat_Off",
+            "waterInlet_Closed",
+            "steamAddLevel_0",
+            "descaleAlarm_Normal",
+            "descaleNewWaterAlarm_Off",
+            "descaleEmptyWaterAlarm_Off",
+            "steamGeneratorLevel_Empty",
+            "steamUsingTime_0",
+            "drainRequired_00",
+            "steamState_Standby",
+            "descaleState_Standby",
+            "waterTankInSwitch_On",
+            "pyroFreeState_Standby",
+            "waterTankOutSwitch_Off"
+          ],
+          "rt": [
+            "x.com.samsung.da.mode"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.a"
+          ]
+        }
+      },
+      {
+        "href": "/operational/state/vs/2",
+        "rep": {
+          "x.com.samsung.da.state": "Ready",
+          "x.com.samsung.da.operationTime": "00:00:00",
+          "x.com.samsung.da.remainingTime": "00:00:00",
+          "x.com.samsung.da.progressPercentage": "1",
+          "rt": [
+            "x.com.samsung.da.operation"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.a"
+          ]
+        }
+      },
+      {
+        "href": "/alarms/vs/2",
+        "rep": {
+          "rt": [
+            "x.com.samsung.da.alarms"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ],
+          "x.com.samsung.da.items": [
+            {
+              "x.com.samsung.da.id": "0",
+              "x.com.samsung.da.description": "Alarm",
+              "x.com.samsung.da.alarmType": "Device",
+              "x.com.samsung.da.code": "OV_E_OFF",
+              "x.com.samsung.da.triggeredTime": "2026-09-26T17:12:37"
+            }
+          ]
+        }
+      },
+      {
+        "href": "/oven/vs/2",
+        "rep": {
+          "x.com.samsung.da.state": "Ready",
+          "rt": [
+            "x.com.samsung.da.oven"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ]
+        }
+      },
+      {
+        "href": "/power/vs/2",
+        "rep": {
+          "x.com.samsung.da.power": "On",
+          "rt": [
+            "x.com.samsung.da.operation"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ]
+        }
+      },
+      {
+        "href": "/remotectrl/vs/2",
+        "rep": {
+          "x.com.samsung.da.remoteControlEnabled": "false",
+          "rt": [
+            "x.com.samsung.da.configuration"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.s"
+          ]
+        }
+      },
+      {
+        "href": "/temperatures/vs/2",
+        "rep": {
+          "x.com.samsung.da.items": [
+            {
+              "x.com.samsung.da.id": "0",
+              "x.com.samsung.da.description": "Temperature",
+              "x.com.samsung.da.desired": "0",
+              "x.com.samsung.da.current": "0",
+              "x.com.samsung.da.increment": "0",
+              "x.com.samsung.da.unit": "Fahrenheit"
+            },
+            {
+              "x.com.samsung.da.id": "1",
+              "x.com.samsung.da.description": "Temperature",
+              "x.com.samsung.da.desired": "0",
+              "x.com.samsung.da.current": "0",
+              "x.com.samsung.da.increment": "0",
+              "x.com.samsung.da.unit": "Fahrenheit"
+            }
+          ],
+          "rt": [
+            "x.com.samsung.da.temperatures"
+          ],
+          "if": [
+            "oic.if.baseline",
+            "oic.if.a"
+          ]
+        }
+      }
+    ]
+  },
+  "seeds_note": "device0 and oic_res are verbatim diagnostics captures (issue #525). The /device/2 seed batch is reconstructed, not captured live: the diagnostics report only carries the subdevice's already-canonicalized resources (subdevices[0].resources), so this reindexes each trailing '.../vs/0' href to '.../vs/2' per subdevices.Subdevice.to_actual's own indexed-sibling rule, rather than recording the raw wire response. /device/1 and /multidevice/vs/0 answered nothing on the device and are left out."
+}

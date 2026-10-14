@@ -5,7 +5,10 @@ from __future__ import annotations
 import re
 
 from homeassistant.const import EntityCategory
+from homeassistant.core import HomeAssistant, callback
+from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.device_registry import DeviceInfo
+from homeassistant.helpers.translation import async_get_translations
 from homeassistant.helpers.update_coordinator import CoordinatorEntity
 
 from .const import DOMAIN
@@ -79,6 +82,28 @@ def _instance_display_name(bound: BoundEntity, state_key: str) -> str:
     return _derive_name(source)
 
 
+# hassfest rejects an unknown top-level translation section, and `selector`
+# is the one that holds free-standing string tables.
+_INSTANCE_NAMES_PREFIX = f"component.{DOMAIN}.selector.instance_name.options."
+
+
+async def async_load_instance_names(hass: HomeAssistant) -> dict[str, str]:
+    """The {instance_name} labels in HA's language, keyed by the slug of
+    the name Python derives for them (issue #533)."""
+    strings = await async_get_translations(hass, hass.config.language, "selector", {DOMAIN})
+    return {
+        key.removeprefix(_INSTANCE_NAMES_PREFIX): value
+        for key, value in strings.items()
+        if key.startswith(_INSTANCE_NAMES_PREFIX)
+    }
+
+
+def _localized_instance_name(name: str, localized: dict[str, str]) -> str:
+    """An unlisted name -- a numbered instance or an ice maker name no
+    fixture has shown yet -- keeps its derived English form."""
+    return localized.get(name.lower().replace(" ", "_"), name)
+
+
 class LocalThingsEntity(CoordinatorEntity[LocalThingsCoordinator]):
     """Base class for all Local Things entities."""
 
@@ -93,7 +118,9 @@ class LocalThingsEntity(CoordinatorEntity[LocalThingsCoordinator]):
             self._attr_translation_placeholders = dict(bound.desc.translation_placeholders)
         elif bound.desc.use_instance_name:
             self._attr_translation_placeholders = {
-                "instance_name": _instance_display_name(bound, self._state_key)
+                "instance_name": _localized_instance_name(
+                    _instance_display_name(bound, self._state_key), coordinator.instance_names
+                )
             }
 
         # _attr_name is deliberately left unset: HA gives an explicitly-set
@@ -115,11 +142,33 @@ class LocalThingsEntity(CoordinatorEntity[LocalThingsCoordinator]):
         at construction time -- a static resolution would risk baking in
         a permanent None if the first poll handed a sibling an empty stub
         rep (see _is_included's docstring) before it populated.
+
+        Falls back to the discovery snapshot while the live cache is empty:
+        an offline load (issue #295) registers entities before any poll, and
+        HA keeps the key it sees then until the entity is next added
+        (issue #531).
         """
         tk = self._bound.desc.translation_key
         if callable(tk):
-            return tk(self._resources)
+            return tk(
+                self._resources or self.coordinator.discovery_canonical(self._bound.subdevice)
+            )
         return tk if tk is not None else self._bound.desc.key
+
+    @callback
+    def _handle_coordinator_update(self) -> None:
+        # The frontend translates state from the registry's copy of the key,
+        # which HA never refreshes on its own (issue #531).
+        entry = self.registry_entry
+        if (
+            entry is not None
+            and callable(self._bound.desc.translation_key)
+            and (tk := self.translation_key) != entry.translation_key
+        ):
+            self.registry_entry = er.async_get(self.hass).async_update_entity(
+                entry.entity_id, translation_key=tk
+            )
+        super()._handle_coordinator_update()
 
     @property
     def _resources(self) -> dict:

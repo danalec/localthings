@@ -11,6 +11,8 @@ from __future__ import annotations
 
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
+from datetime import datetime
+from datetime import time as dt_time
 from typing import Any
 
 WriteFn = Callable[[Any, dict], "tuple[list[str], dict] | None"] | None
@@ -20,6 +22,12 @@ WriteFn = Callable[[Any, dict], "tuple[list[str], dict] | None"] | None
 # option list).
 ValidateFn = Callable[[Any, dict, dict], "str | None"] | None
 DisplayFn = Callable[[Any, dict], Any] | None
+ButtonPayloadFn = Callable[[datetime], Any] | None
+# (picked time, local now) -> the payload write_fn receives, for a control
+# whose device field holds a duration rather than a clock reading. The
+# platform supplies `now` so the registry stays free of HA's timezone
+# handling, the same split ButtonPayloadFn uses.
+TimePayloadFn = Callable[[dt_time, datetime], Any] | None
 
 
 def _identity(v: Any) -> Any:
@@ -51,6 +59,13 @@ class SamsungEntityDescription:
     # resources is the coordinator's full href->rep snapshot, for gating
     # presence on a sibling resource (e.g. laundry.cycle_options's source).
     exists_fn: Callable[[dict, dict], bool] | None = None
+    extra_state_attributes_fn: Callable[[dict, dict], dict[str, Any]] | None = None
+    # One of cook.PARAM_*: a cook parameter the coordinator holds while an
+    # idle oven can be started, instead of writing it (issue #473).
+    cook_param: str | None = None
+    # False for a write the appliance takes with Remote Control off; the
+    # coordinator then leaves the refusal, if any, to the appliance.
+    needs_remote_control: bool = True
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -59,7 +74,10 @@ class SensorDesc(SamsungEntityDescription):
     state_class: str | None = None
     unit: str | None = None
     unit_fn: Callable[[dict], str] | None = None  # overrides `unit` from the live rep, when set
-    options: tuple | None = None  # required by HA when device_class == 'enum'
+    # Required by HA when device_class == 'enum'. The callable form receives
+    # the coordinator's canonical href->rep snapshot and returns final sensor
+    # state options; its input shape matches SelectDesc.options.
+    options: Any = None  # tuple[str, ...] | Callable[[dict[str, dict]], list[str]]
     # Opt-in: gate this value behind CONF_FINISH_TIME_HYSTERESIS_MINUTES
     # (see sensor.py). Only for values expected to jitter between
     # device-side revisions -- not a general-purpose flag.
@@ -95,6 +113,7 @@ class SelectDesc(SamsungEntityDescription):
     # identically to the current state and every option.
     display_fn: DisplayFn = None
     write_fn: WriteFn = None
+    validate_fn: ValidateFn = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -105,9 +124,21 @@ class SwitchDesc(SamsungEntityDescription):
 
 
 @dataclass(frozen=True, kw_only=True)
-class ButtonDesc(SamsungEntityDescription):
-    payload: str = ""
+class LightDesc(SamsungEntityDescription):
+    supports_brightness: bool = False
     write_fn: WriteFn = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ButtonDesc(SamsungEntityDescription):
+    payload: Any = ""
+    # Optional press-time payload generation. The button platform supplies
+    # Home Assistant's current local time so registry modules stay HA-free.
+    payload_fn: ButtonPayloadFn = None
+    write_fn: WriteFn = None
+    # The command field is accepted on POST but never appears in a readable
+    # representation. Skip the coordinator's optimistic cache merge for it.
+    write_only: bool = False
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -124,6 +155,9 @@ class NumberDesc(SamsungEntityDescription):
     native_min_fn: Callable[[dict], float] | None = None
     native_max_fn: Callable[[dict], float] | None = None
     step_fn: Callable[[dict], float] | None = None
+    # (rep, resources) -> (min, max, step), or None to fall through to the
+    # per-rep overrides above -- for bounds that live on a sibling href.
+    bounds_fn: Callable[[dict, dict], tuple[float, float, float] | None] | None = None
     range_field: str | None = None  # resource field containing [min, max] list
     write_fn: WriteFn = None
 
@@ -131,6 +165,7 @@ class NumberDesc(SamsungEntityDescription):
 @dataclass(frozen=True, kw_only=True)
 class TimeDesc(SamsungEntityDescription):
     write_fn: WriteFn = None
+    payload_fn: TimePayloadFn = None
 
 
 @dataclass(frozen=True, kw_only=True)
@@ -139,6 +174,16 @@ class ClimateDesc(SamsungEntityDescription):
     # climate platform reads sibling resources from the coordinator
     # snapshot and writes to several of them. write_fn takes a (kind,
     # value) payload and returns the (path_segs, body) for that sub-write.
+    write_fn: WriteFn = None
+
+
+@dataclass(frozen=True, kw_only=True)
+class ZoneClimateDesc(SamsungEntityDescription):
+    # A heat pump zone as a climate entity: power, mode and temperature each
+    # on their own href, named here so one platform class serves every zone.
+    power_href: str = ""
+    mode_href: str = ""
+    temperature_href: str = ""
     write_fn: WriteFn = None
 
 
@@ -161,10 +206,12 @@ PLATFORM_OF: dict[type, str] = {
     BinarySensorDesc: "binary_sensor",
     SelectDesc: "select",
     SwitchDesc: "switch",
+    LightDesc: "light",
     ButtonDesc: "button",
     NumberDesc: "number",
     TimeDesc: "time",
     ClimateDesc: "climate",
     FanDesc: "fan",
     WaterHeaterDesc: "water_heater",
+    ZoneClimateDesc: "climate",
 }

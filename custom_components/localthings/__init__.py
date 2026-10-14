@@ -12,12 +12,14 @@ from homeassistant.config_entries import ConfigEntry
 from homeassistant.const import EVENT_HOMEASSISTANT_STOP
 from homeassistant.core import Event, HomeAssistant, callback
 from homeassistant.exceptions import ConfigEntryNotReady
+from homeassistant.helpers import config_validation as cv
 from homeassistant.helpers import device_registry as dr
 from homeassistant.helpers import entity_registry as er
 from homeassistant.helpers.typing import ConfigType
 
 from .const import CONF_DEVICE_TYPE, CONF_HOST, CONF_PORT, CONF_SERIAL, DOMAIN, PLATFORMS
-from .coordinator import LocalThingsCoordinator, snapshot_store
+from .coordinator import LocalThingsCoordinator, mode_spec_store, snapshot_store
+from .entity import async_load_instance_names
 from .registry.identity import resolve_serial
 from .rekey import rekey_entry
 from .services import async_setup_services
@@ -39,6 +41,9 @@ PARTICULATE_UNIT = (
     if _unit_of_density is not None
     else ha_const.CONCENTRATION_MICROGRAMS_PER_CUBIC_METER
 )
+
+
+CONFIG_SCHEMA = cv.config_entry_only_config_schema(DOMAIN)
 
 
 async def async_setup(hass: HomeAssistant, config: ConfigType) -> bool:
@@ -101,10 +106,11 @@ def _repair_placeholder_keys(hass: HomeAssistant, entry: ConfigEntry, serial: st
 
 # Registries whose Dust/FineDust/SuperFineDust sensors gained pm10/pm25/pm1
 # and a unit in the release that introduced entry version 3. Deliberately
-# not every family reading /sensors/vs/0: range_hood and airconditioner
-# still declare no unit for their identically-named sensors, and relabelling
-# their statistics to µg/m³ would assert a unit those entities don't report
-# -- creating the very mismatch this migration exists to prevent.
+# not every family reading /sensors/vs/0: range_hood still declares no unit
+# for its identically-named sensors, and relabelling their statistics to
+# µg/m³ would assert a unit those entities don't report. airconditioner's
+# gained a unit later (issue #583) but had no state_class before, so it
+# recorded no statistics to relabel.
 _PARTICULATE_TYPED_IN_V3 = frozenset({"air_purifier", "air_monitor"})
 
 # unique_id is f"{DOMAIN}_{serial}_{state_key}"; state_key is the descriptor
@@ -193,6 +199,56 @@ def _relabel_particulate_statistics(hass: HomeAssistant, entry: ConfigEntry) -> 
     return True
 
 
+# The dryer's dryLevel and dryTime moved from SensorDesc to SelectDesc in
+# #439. unique_ids are scoped by (integration, platform), so that move can't
+# rewrite the old rows -- they can only be dropped, and until they are, each
+# upgraded dryer keeps a permanently-unavailable `sensor.<name>_dry_level`
+# (and `_dry_time`) carrying the user's rename and area.
+#
+# Tail-matched for the same reason as _PARTICULATE_KEY_RE above: the id is
+# f"{DOMAIN}_{serial}_{state_key}" with an optional subdevice prefix and a
+# trailing `_<n>` instance, and matching the tail keeps working for a renamed
+# entity. No device-type gate is needed -- no registry binds a sensor-domain
+# dry_level or dry_time any more, so the domain check plus this tail is
+# already exact.
+_MOVED_TO_SELECT_KEY_RE = re.compile(r"_(?:dry_level|dry_time)(?:_\d+)?$")
+
+
+@callback
+def _drop_sensors_superseded_by_selects(hass: HomeAssistant, entry: ConfigEntry) -> None:
+    """Drop the sensor rows dryer.py's dry_level/dry_time selects supersede.
+
+    Runs on every setup rather than as a numbered migration. The sweep is
+    idempotent -- after the first pass there is nothing left matching the
+    pattern in the sensor domain -- so a version gate would buy only running
+    it once, at the cost of a bump that makes the *whole entry* fail to load
+    on a downgrade (`entry.version > 4` in async_migrate_entry) instead of
+    losing two entities. That trade isn't worth it for a registry tidy-up.
+
+    Not gated on the select existing either: dry_level is field-gated and
+    dry_time carries an exists_fn, so on a board reporting neither there is
+    no replacement -- but the sensor is equally dead there, because no
+    registry binds these keys to the sensor platform any more.
+    """
+    ent_reg = er.async_get(hass)
+    for registry_entry in er.async_entries_for_config_entry(ent_reg, entry.entry_id):
+        if registry_entry.domain != "sensor":
+            continue
+        if not _MOVED_TO_SELECT_KEY_RE.search(registry_entry.unique_id):
+            continue
+        # INFO, not debug: this is irreversible and takes the user's rename,
+        # area and any automation reference with it. The replacement is named
+        # by platform only -- deriving `select.<object_id>` from this row
+        # would be a guess, since a renamed sensor's object id is not the one
+        # the new select gets.
+        _LOGGER.info(
+            "Removing %s, superseded by a select entity on the same device; "
+            "update any automation or dashboard that referenced it",
+            registry_entry.entity_id,
+        )
+        ent_reg.async_remove(registry_entry.entity_id)
+
+
 async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     """Migrate an entry to the current version.
 
@@ -263,6 +319,11 @@ async def async_migrate_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
 async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     hass.data.setdefault(DOMAIN, {})
+
+    # Before the platforms register anything, so an upgraded dryer never has
+    # the dead sensor row and its replacement select alive at the same time.
+    _drop_sensors_superseded_by_selects(hass, entry)
+
     coordinator = LocalThingsCoordinator(hass, entry)
 
     # Before the first refresh, so the coordinator keeps rescheduling even
@@ -271,6 +332,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
     # legitimately have zero live entities (every one of them disabled, say).
     # Without this the entry loads once and never polls again (issue #295).
     entry.async_on_unload(coordinator.async_add_listener(lambda: None))
+    await coordinator.async_load_mode_specs()
 
     try:
         await coordinator.async_config_entry_first_refresh()
@@ -326,6 +388,7 @@ async def async_setup_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:
 
     entry.async_on_unload(entry.add_update_listener(_async_options_updated))
 
+    coordinator.instance_names = await async_load_instance_names(hass)
     await hass.config_entries.async_forward_entry_setups(entry, PLATFORMS)
     return True
 
@@ -364,13 +427,15 @@ async def async_remove_config_entry_device(
 
 
 async def async_remove_entry(hass: HomeAssistant, entry: ConfigEntry) -> None:
-    """Delete the discovery snapshot this entry accumulated (issue #295).
+    """Delete the discovery snapshot (issue #295) and remembered modeSpecs
+    (#600) this entry accumulated.
 
     Nothing else would: the store is keyed on entry_id, so re-adding the same
     appliance mints a new one and the old file would linger in .storage
     forever.
     """
     await snapshot_store(hass, entry).async_remove()
+    await mode_spec_store(hass, entry).async_remove()
 
 
 async def async_unload_entry(hass: HomeAssistant, entry: ConfigEntry) -> bool:

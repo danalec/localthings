@@ -58,6 +58,9 @@
       "door_open": {
         "name": "Dvířka"
       },
+      "filter_blockage": {
+        "name": "Ucpání filtru"
+      },
       "filter_door_status": {
         "name": "Dvířka filtru"
       },
@@ -65,7 +68,7 @@
         "name": "Dostupná aktualizace firmwaru"
       },
       "instance_open": {
-        "name": "{instance_name} otevřeno"
+        "name": "{instance_name} – otevřeno"
       },
       "paired_hood_connected": {
         "name": "Spárovaný odsavač připojen"
@@ -115,8 +118,47 @@
       "add_wash_indicator": {
         "name": "AddWash připraveno"
       },
+      "pre_wash_selected": {
+        "name": "Předpírka zvolena"
+      },
+      "delay_wash_set": {
+        "name": "Odložený start nastaven"
+      },
       "stick_ble_connected": {
         "name": "Tyč připojena přes BLE"
+      },
+      "cooktop_burner": {
+        "name": "Hořák {number}"
+      },
+      "beep": {
+        "name": "Pípání"
+      },
+      "remind_beep": {
+        "name": "Připomínací signál konce"
+      },
+      "display_time_auto_sync": {
+        "name": "Automatická synchronizace času"
+      },
+      "grease_filter_alarm": {
+        "name": "Alarm tukového filtru"
+      },
+      "front_vent_open": {
+        "name": "Přední ventilace"
+      },
+      "dual_setpoint_enabled": {
+        "name": "Dvojí žádaná teplota zapnuta"
+      },
+      "divider": {
+        "name": "Přepážka"
+      },
+      "wrinkle_prevent_active": {
+        "name": "Ochrana proti pomačkání aktivní"
+      },
+      "cooktop_sync_control": {
+        "name": "Synchronizované ovládání"
+      },
+      "cooktop_paused": {
+        "name": "Pozastaveno"
       }
     },
     "button": {
@@ -128,6 +170,24 @@
       },
       "auto_clean_stop": {
         "name": "Zastavit samočištění"
+      },
+      "air_filter_reset": {
+        "name": "Resetovat vzduchový filtr"
+      },
+      "air_filter_pm1_reset": {
+        "name": "Resetovat filtr PM1.0"
+      },
+      "hepa_filter_reset": {
+        "name": "Resetovat filtr HEPA"
+      },
+      "deodor_filter_reset": {
+        "name": "Resetovat pachový filtr"
+      },
+      "hood_filter_reset": {
+        "name": "Resetovat filtr digestoře"
+      },
+      "filter_reset": {
+        "name": "Resetovat vodní filtr"
       },
       "filter_time_reset": {
         "name": "Vynulovat počítadlo filtru"
@@ -141,8 +201,14 @@
       "start": {
         "name": "Spustit"
       },
+      "sync_clock": {
+        "name": "Synchronizovat hodiny"
+      },
       "stop": {
         "name": "Zastavit"
+      },
+      "start_cooking": {
+        "name": "Spustit vaření"
       }
     },
     "climate": {
@@ -172,6 +238,12 @@
             }
           }
         }
+      },
+      "zone_climate": {
+        "name": "Zóna 1"
+      },
+      "zone2_climate": {
+        "name": "Zóna 2"
       }
     },
     "fan": {
@@ -189,6 +261,11 @@
         }
       }
     },
+    "light": {
+      "lamp": {
+        "name": "Lampa"
+      }
+    },
     "number": {
       "cook_time": {
         "name": "Doba vaření"
@@ -203,7 +280,7 @@
         "name": "Klidný spánek"
       },
       "instance_setpoint": {
-        "name": "{instance_name} požadovaná teplota"
+        "name": "{instance_name} – požadovaná teplota"
       },
       "oven_setpoint": {
         "name": "Požadovaná teplota"
@@ -228,6 +305,15 @@
       }
     },
     "select": {
+      "welcome_lighting_proximity": {
+        "name": "Citlivost uvítacího osvětlení",
+        "state": {
+          "nearest": "Nejblíže",
+          "near": "Blízko",
+          "middle": "Středně",
+          "far": "Daleko"
+        }
+      },
       "ai_energy_level": {
         "name": "Úroveň režimu AI Energy"
       },
@@ -236,6 +322,13 @@
       },
       "auto_door_timer": {
         "name": "Časovač automatického otevírání dvířek"
+      },
+      "auto_door_mode": {
+        "name": "Režim automatického otevírání dvířek",
+        "state": {
+          "easy_open": "Snadné otevření",
+          "wide_open": "Široké otevření"
+        }
       },
       "beverage_zone_mode": {
         "name": "Režim zóny nápojů",
@@ -253,7 +346,7 @@
         }
       },
       "cooler_temperature_setpoint": {
-        "name": "Teplota chladicí zóny"
+        "name": "Teplota chladničky"
       },
       "day_brightness": {
         "name": "Jas skříně",
@@ -322,7 +415,8 @@
           "88": "Samočištění",
           "85": "Jemné",
           "0c": "Express",
-          "0d": "Samočištění"
+          "0d": "Samočištění",
+          "87": "Pouze máchání"
         }
       },
       "dispense_type": {
@@ -413,7 +507,27 @@
           "3a": "Hygienické sušení",
           "3b": "Ložní prádlo/Odstranění prachu",
           "3c": "Sportovní oblečení",
-          "3d": "Džíny"
+          "3d": "Džíny",
+          "2f": "Intenzivní",
+          "30": "Sportovní oblečení",
+          "32": "Nežehlivé prádlo",
+          "33": "Parní dezinfekce+",
+          "34": "Osvěžení párou",
+          "35": "Proti pomačkání",
+          "36": "Provětrání",
+          "3e": "Malá náplň",
+          "2e": "Eco normální"
+        }
+      },
+      "dryer_dry_level": {
+        "name": "Úroveň sušení",
+        "state": {
+          "none": "Vypnuto",
+          "damp": "Vlhké",
+          "less": "Méně",
+          "normal": "Normální",
+          "more": "Více",
+          "very": "Velmi"
         }
       },
       "favorite_capacity": {
@@ -441,6 +555,7 @@
       "flex_zone_mode": {
         "name": "Režim flexibilní zóny",
         "state": {
+          "cv_ttype_rf9000a_fridge": "Chlazení",
           "cv_ttype_rf9000a_freeze": "Mražení",
           "cv_ttype_rf9000a_softfreeze": "Mírné mražení",
           "cv_ttype_rf9000a_meat_fish": "Maso/Ryby",
@@ -450,7 +565,10 @@
           "cv_fdr_deli": "Lahůdky",
           "cv_fdr_beverage": "Nápoje",
           "cv_fdr_meat": "Maso",
-          "cv_fdr_soft_freezer": "Mírný mrazák"
+          "cv_fdr_soft_freezer": "Mírný mrazák",
+          "fconvert_freezer": "Mražení",
+          "fconvert_fridge": "Chlazení",
+          "fconvert_off": "Vypnuto"
         }
       },
       "heated_dry": {
@@ -466,7 +584,7 @@
         "name": "Teplota horké vody"
       },
       "ice_type": {
-        "name": "{instance_name} typ",
+        "name": "{instance_name} – typ",
         "state": {
           "off": "Vypnuto",
           "whiskey_iceball_3": "3 kuličky/den",
@@ -516,14 +634,30 @@
           "frozen_pizza_plus": "Mražená pizza+",
           "slow_cook": "Pomalé vaření",
           "plate_warm": "Ohřev talířů",
-          "air_fry": "Fritéza na vzduch"
+          "air_fry": "Fritéza na vzduch",
+          "convection_roast": "Pečení horkým vzduchem",
+          "keep_warm": "Udržování teploty",
+          "bread_proof": "Kynutí těsta",
+          "dehydrate": "Sušení",
+          "self_clean": "Samočištění",
+          "air_fryer": "Horkovzdušná fritéza",
+          "upper_broil": "Gril (horní)",
+          "upper_convection_bake": "Konvekční pečení (horní)",
+          "upper_convection_roast": "Pečení horkým vzduchem (horní)",
+          "lower_bake": "Pečení (dolní)",
+          "lower_convection_bake": "Konvekční pečení (dolní)",
+          "steam_bake": "Pečení s párou",
+          "steam_roast": "Pečení masa s párou",
+          "upper_steam_bake": "Pečení s párou (horní)",
+          "descale": "Odvápnění",
+          "drain": "Vypuštění vody"
         }
       },
       "operating_mode": {
         "name": "Provozní režim"
       },
       "kimchi_zone_mode": {
-        "name": "{instance_name} režim uskladnění",
+        "name": "{instance_name} – režim uskladnění",
         "state": {
           "off": "Vypnuto",
           "kimchi_storage_normal": "Kimči",
@@ -561,7 +695,9 @@
         "state": {
           "fdr_wine": "Víno",
           "fdr_deli": "Lahůdky",
-          "fdr_drinks": "Nápoje"
+          "fdr_drinks": "Nápoje",
+          "ttype_meat_fish": "Maso/Ryby",
+          "ttype_rf9000a_fridge": "Chlazení"
         }
       },
       "winecellar_pantry_zone_mode": {
@@ -592,6 +728,15 @@
       "rinse_cycles": {
         "name": "Počet máchání"
       },
+      "laundry_out_time": {
+        "name": "Připomínka vyjmutí prádla",
+        "state": {
+          "0": "Vypnuto",
+          "30": "Každých 30 min",
+          "60": "Každých 60 min",
+          "90": "Každých 90 min"
+        }
+      },
       "sensing_mode": {
         "name": "Akce AI Purify",
         "state": {
@@ -615,6 +760,17 @@
           "01": "Nízké",
           "02": "Střední",
           "03": "Vysoké"
+        }
+      },
+      "soil_level": {
+        "name": "Úroveň znečištění",
+        "state": {
+          "none": "Žádná",
+          "extra_light": "Extra lehké",
+          "light": "Lehké",
+          "normal": "Běžné",
+          "heavy": "Silné",
+          "extra_heavy": "Extra silné"
         }
       },
       "sound_mode": {
@@ -650,7 +806,9 @@
           "no_spin": "Bez odstřeďování",
           "low": "Nízká",
           "medium": "Střední",
-          "high": "Vysoká"
+          "high": "Vysoká",
+          "extra_low": "Extra nízké",
+          "extra_high": "Extra vysoké"
         }
       },
       "wash_temperature": {
@@ -661,23 +819,53 @@
           "cool": "Chladná",
           "warm": "Teplá",
           "hot": "Horká",
-          "extra_hot": "Extra horká"
+          "extra_hot": "Extra horká",
+          "tap_cold": "Studená z kohoutku"
         }
       },
       "washer_cycle_table_00": {
         "name": "Cyklus",
         "state": {
           "01": "Normální",
-          "70": "Intenzivní",
           "55": "Bílé prádlo",
+          "57": "Samočištění+",
+          "5b": "Bavlna",
+          "5c": "Extra rychlý",
+          "5d": "Super Eco",
+          "5e": "Jemné prádlo",
+          "5f": "Dětské potřeby",
+          "60": "Outdoor",
+          "61": "Tmavé prádlo",
+          "63": "Čištění bubnu",
+          "64": "Máchání + odstřeďování",
+          "65": "Vlna",
+          "66": "Ložní prádlo",
+          "67": "Syntetika",
+          "68": "Eko bavlna",
+          "6b": "Pouze odstřeďování",
+          "6c": "Džíny",
+          "70": "Intenzivní",
           "71": "Ložní prádlo",
           "72": "Dezinfekce",
-          "77": "Nežehlivé prádlo",
-          "57": "Samočištění+",
           "73": "Máchání + odstřeďování",
           "74": "Sportovní oblečení",
           "75": "Jemné prádlo",
-          "78": "Rychlé praní"
+          "77": "Nežehlivé prádlo",
+          "78": "Rychlé praní",
+          "ba": "Vypuštění/odstřeďování",
+          "d0": "Bavlna",
+          "d1": "Eko bavlna",
+          "d2": "Syntetika",
+          "d3": "Jemné prádlo",
+          "d4": "Máchání + odstřeďování",
+          "d5": "Čištění bubnu",
+          "d6": "Ložní prádlo",
+          "d7": "Outdoor péče",
+          "d8": "Vlna",
+          "da": "Super Eco",
+          "db": "Super rychlé",
+          "dc": "15min rychlé praní",
+          "e4": "Antialergenní"
         }
       },
       "washer_cycle_table_02": {
@@ -739,13 +927,18 @@
           "38": "Sušení bavlny",
           "39": "Sušení syntetiky",
           "3a": "Čištění bubnu",
+          "51": "Super Speed",
           "52": "Eco studená",
           "53": "Intenzivní",
           "54": "Ručníky",
           "55": "Sportovní oblečení",
-          "57": "Jemné",
+          "56": "Ložní prádlo",
+          "57": "Jemné prádlo",
+          "5a": "Parní dezinfekce",
+          "5b": "Malá náplň",
           "5e": "Máchání+odstřeďování",
           "60": "Samočištění+",
+          "64": "Bílé prádlo s párou",
           "65": "Barevné prádlo",
           "66": "Džíny",
           "69": "AI praní",
@@ -769,13 +962,23 @@
           "7d": "Ložní prádlo/nepromokavé",
           "7e": "Samočištění",
           "7f": "Vlna/jemné",
+          "85": "Normální s párou",
           "86": "Hloubkové praní",
           "87": "Stažený program",
           "88": "Péče o domácí mazlíčky",
+          "8b": "Rychlé praní",
+          "8c": "AI OptiWash",
           "8f": "Intenzivní studená",
           "96": "Méně mikrovláken",
           "a0": "15min rychlé praní",
-          "b0": "Smíšená náplň"
+          "b0": "Smíšená náplň",
+          "58": "Vlna",
+          "5c": "Outdoor",
+          "5d": "Výkonné máchání",
+          "5f": "Pouze odstřeďování",
+          "63": "Výkonná pára",
+          "67": "Parní antialergenní",
+          "68": "Parní objemné prádlo"
         }
       },
       "washer_dry_level": {
@@ -845,11 +1048,93 @@
         "state": {
           "purification": "Čištění",
           "ventilation": "Větrání",
-          "smartventilation": "Chytré větrání"
+          "smartventilation": "Chytré větrání",
+          "aicomfort": "AI komfort",
+          "autoventilation": "Automatické větrání",
+          "freshairintake": "Přívod čerstvého vzduchu",
+          "indoorpurification": "Čištění vnitřního vzduchu",
+          "indoordehumidification": "Odvlhčování vnitřního vzduchu"
+        }
+      },
+      "dry_time": {
+        "name": "Doba sušení"
+      },
+      "booster_fan_mode": {
+        "name": "Režim ventilátoru boosteru",
+        "state": {
+          "off": "Vypnuto",
+          "auto": "Automaticky",
+          "high": "Vysoká",
+          "medium": "Střední"
+        }
+      },
+      "booster_light_color_temperature": {
+        "name": "Teplota barvy světla boosteru",
+        "state": {
+          "3000k": "3000 K",
+          "4000k": "4000 K",
+          "6500k": "6500 K"
+        }
+      },
+      "booster_light_brightness": {
+        "name": "Jas světla boosteru",
+        "state": {
+          "smart": "Chytrý",
+          "high": "Vysoký",
+          "low": "Nízký"
+        }
+      },
+      "booster_oscillation_angle": {
+        "name": "Úhel oscilace boosteru",
+        "state": {
+          "normal": "Normální",
+          "circulation": "Cirkulace",
+          "right_narrow": "Vpravo úzce",
+          "right_wide": "Vpravo široce",
+          "left_narrow": "Vlevo úzce",
+          "left_wide": "Vlevo široce"
+        }
+      },
+      "ai_motion_wind": {
+        "name": "AI proudění vzduchu podle pohybu",
+        "state": {
+          "off": "Vypnuto",
+          "surround": "Všesměrové",
+          "longreach": "Dlouhý dosah",
+          "down": "Dolů",
+          "power": "Výkon",
+          "windfree": "Wind-Free",
+          "aidirect": "AI přímé",
+          "aiindirect": "AI nepřímé"
+        }
+      },
+      "wash_zone": {
+        "name": "Zóna mytí",
+        "state": {
+          "on_on": "Oba koše",
+          "off_on": "Pouze spodní koš",
+          "on_off": "Pouze horní koš"
+        }
+      },
+      "lamp_level": {
+        "name": "Úroveň osvětlení",
+        "state": {
+          "off": "Vypnuto",
+          "low": "Nízká",
+          "high": "Vysoká"
         }
       }
     },
     "sensor": {
+      "welcome_lighting_sense_level": {
+        "name": "Úroveň snímání uvítacího osvětlení",
+        "state": {
+          "nearest": "Nejblíže",
+          "near": "Blízko",
+          "middle": "Středně",
+          "far": "Daleko"
+        }
+      },
       "auto_clean_progress": {
         "name": "Průběh automatického čištění"
       },
@@ -885,6 +1170,9 @@
       },
       "burner_state": {
         "name": "Stav hořáku {number}"
+      },
+      "burner_power_level": {
+        "name": "Úroveň výkonu hořáku {number}"
       },
       "clean_level": {
         "name": "Úroveň čištění"
@@ -987,6 +1275,12 @@
       "current_temp_c": {
         "name": "Teplota"
       },
+      "food_probe_temp": {
+        "name": "Teplotní sonda"
+      },
+      "food_probe_setpoint": {
+        "name": "Cílová teplota sondy"
+      },
       "current_temperature_c": {
         "name": "Teplota"
       },
@@ -1008,16 +1302,19 @@
       "drum_clean_last_cleaned": {
         "name": "Poslední čištění bubnu"
       },
-      "dry_level": {
-        "name": "Úroveň sušení"
-      },
-      "dry_time": {
-        "name": "Doba sušení"
+      "quick_wash": {
+        "name": "Rychlé praní",
+        "state": {
+          "not_used": "Nedostupné",
+          "off": "Vypnuto",
+          "on": "Zapnuto"
+        }
       },
       "dryer_type": {
         "name": "Typ sušičky",
         "state": {
-          "electricity": "Elektřina"
+          "electricity": "Elektřina",
+          "gas": "Plyn"
         }
       },
       "dust": {
@@ -1025,6 +1322,9 @@
       },
       "energy_kwh": {
         "name": "Energie"
+      },
+      "usage_runtime_hours": {
+        "name": "Doba provozu"
       },
       "energy_last_month_kwh": {
         "name": "Energie (minulý měsíc)"
@@ -1066,13 +1366,13 @@
         "name": "Teplota chladničky"
       },
       "kimchi_ripening_status": {
-        "name": "{instance_name} stav zrání"
+        "name": "{instance_name} – stav zrání"
       },
       "kimchi_ripening_remaining": {
-        "name": "{instance_name} zbývající čas zrání"
+        "name": "{instance_name} – zbývající čas zrání"
       },
       "kimchi_rack_count": {
-        "name": "{instance_name} počet přihrádek"
+        "name": "{instance_name} – počet přihrádek"
       },
       "hood_filter_capacity": {
         "name": "Kapacita filtru"
@@ -1084,7 +1384,7 @@
         "name": "Využití filtru"
       },
       "instance_temperature": {
-        "name": "{instance_name} teplota"
+        "name": "{instance_name} – teplota"
       },
       "job_beginning_status": {
         "name": "Stav zahájení úlohy"
@@ -1150,6 +1450,7 @@
         "name": "Průběh",
         "state": {
           "idle": "Nečinný",
+          "delaywash": "Odložený start",
           "weightsensing": "Detekce náplně",
           "wash": "Praní",
           "rinse": "Máchání",
@@ -1227,7 +1528,7 @@
         }
       },
       "ice_making_status": {
-        "name": "{instance_name} stav výroby",
+        "name": "{instance_name} – stav výroby",
         "state": {
           "icestatus_stop": "Nečinný",
           "icestatus_run": "Vyrábí led"
@@ -1235,6 +1536,9 @@
       },
       "zone_temperature": {
         "name": "Teplota zóny"
+      },
+      "zone2_temperature": {
+        "name": "Teplota zóny 2"
       },
       "watertank_full_alarm_status": {
         "name": "Stav alarmu plné nádržky na vodu"
@@ -1244,9 +1548,90 @@
       },
       "air_filter_pm1_usage_hours": {
         "name": "Hodiny využití PM1 filtru"
+      },
+      "active_burners": {
+        "name": "Aktivní hořáky"
+      },
+      "cooktop_monitoring": {
+        "name": "Sledování varné desky"
+      },
+      "booster_angle_location": {
+        "name": "Poloha úhlu boosteru"
+      },
+      "cooking_mode": {
+        "name": "Režim vaření",
+        "state": {
+          "no_operation": "Bez provozu",
+          "micro_wave": "Mikrovlny",
+          "autocook": "Automatické vaření",
+          "keep_warm": "Udržování teploty"
+        }
+      },
+      "cook_time": {
+        "name": "Doba vaření"
+      },
+      "cook_time_remaining": {
+        "name": "Zbývající doba vaření"
+      },
+      "cook_finish_time": {
+        "name": "Čas dokončení vaření"
+      },
+      "sub_operation": {
+        "name": "Dílčí operace"
+      },
+      "hood_fan_speed": {
+        "name": "Otáčky ventilátoru",
+        "state": {
+          "off": "Vypnuto",
+          "low": "Nízké",
+          "medium": "Střední",
+          "high": "Vysoké",
+          "boost": "Turbo"
+        }
+      },
+      "hood_lamp": {
+        "name": "Lampa",
+        "state": {
+          "off": "Vypnuto",
+          "medium": "Střední",
+          "on": "Zapnuto"
+        }
+      },
+      "dual_setpoint_cooling": {
+        "name": "Dvojí žádaná teplota chlazení"
+      },
+      "dual_setpoint_heating": {
+        "name": "Dvojí žádaná teplota topení"
+      },
+      "auto_changeover_cool_primary_offset": {
+        "name": "Automatické přepínání primární odchylka chlazení"
+      },
+      "auto_changeover_cool_secondary_offset": {
+        "name": "Automatické přepínání sekundární odchylka chlazení"
+      },
+      "auto_changeover_heat_primary_offset": {
+        "name": "Automatické přepínání primární odchylka topení"
+      },
+      "auto_changeover_heat_secondary_offset": {
+        "name": "Automatické přepínání sekundární odchylka topení"
+      },
+      "cooktop_device_type": {
+        "name": "Kód typu zařízení"
+      },
+      "cooktop_flex_coil": {
+        "name": "Kód cívky Flex"
+      },
+      "main_timer_set": {
+        "name": "Nastavení hlavního časovače"
+      },
+      "burner_pan_size": {
+        "name": "Velikost nádoby zóny {number}"
       }
     },
     "switch": {
+      "night_lighting_schedule": {
+        "name": "Plán nočního osvětlení"
+      },
       "ai_energy_level": {
         "name": "Režim AI Energy"
       },
@@ -1364,8 +1749,11 @@
       "ice_night_mode": {
         "name": "Noční tichý režim výroby ledu"
       },
+      "ai_precise_cooling": {
+        "name": "AI přesné chlazení"
+      },
       "instance_enabled": {
-        "name": "{instance_name} zapnuto"
+        "name": "{instance_name} – zapnuto"
       },
       "intensive": {
         "name": "Intenzivní"
@@ -1424,6 +1812,9 @@
       "sound": {
         "name": "Zvuk"
       },
+      "station_light": {
+        "name": "Světlo stanice"
+      },
       "storm_wash": {
         "name": "Storm Wash+"
       },
@@ -1459,9 +1850,42 @@
       },
       "windsleep": {
         "name": "Noční režim"
+      },
+      "auto_detergent": {
+        "name": "Automatické dávkování pracího prostředku"
+      },
+      "auto_softener": {
+        "name": "Automatické dávkování aviváže"
+      },
+      "booster_light": {
+        "name": "Světlo boosteru"
+      },
+      "booster_light_manual_brightness": {
+        "name": "Ruční jas boosteru"
+      },
+      "booster_oscillation": {
+        "name": "Oscilace boosteru"
+      },
+      "auto_changeover": {
+        "name": "Automatické přepínání"
+      },
+      "interlock": {
+        "name": "Propojení provozu"
+      },
+      "speed_booster": {
+        "name": "Speed Booster"
+      },
+      "damp_alert": {
+        "name": "Upozornění na vlhké prádlo"
+      },
+      "extra_rinse": {
+        "name": "Extra máchání"
       }
     },
     "time": {
+      "delay_finish_at": {
+        "name": "Dokončit v"
+      },
       "dnd_end": {
         "name": "Konec režimu Nerušit"
       },
@@ -1473,6 +1897,12 @@
       },
       "led_night_start": {
         "name": "Začátek nočního LED osvětlení dvířek"
+      },
+      "ice_night_end": {
+        "name": "Konec nočního tichého režimu výroby ledu"
+      },
+      "ice_night_start": {
+        "name": "Začátek nočního tichého režimu výroby ledu"
       },
       "night_end": {
         "name": "Konec nočního osvětlení"
@@ -1497,16 +1927,12 @@
     "step": {
       "user": {
         "title": "Přidat spotřebič Samsung",
-        "description": "Zadejte IP adresu vašeho spotřebiče Samsung a přihlašovací údaje CA AC14K_M použité k vydávání certifikátů zařízení.",
+        "description": "Zadejte IP adresu vašeho spotřebiče Samsung. LocalThings jej nastaví automaticky pomocí vlastnoručně podepsaného certifikátu – většina spotřebičů nepotřebuje nic dalšího.",
         "data": {
-          "host": "IP adresa",
-          "ca_cert_pem": "Certifikát CA (PEM)",
-          "ca_key_pem": "Privátní klíč CA (PEM)"
+          "host": "IP adresa"
         },
         "data_description": {
-          "host": "Lokální IP adresa vašeho spotřebiče Samsung (např. 192.168.1.50).",
-          "ca_cert_pem": "Certifikát CA AC14K_M ve formátu PEM. Vložte celý obsah řetězce fullchain PEM včetně všech bloků BEGIN/END CERTIFICATE.",
-          "ca_key_pem": "Privátní klíč AC14K_M ve formátu PEM. Vložte celý obsah včetně hlavičky a patičky BEGIN/END PRIVATE KEY."
+          "host": "Lokální IP adresa vašeho spotřebiče Samsung (např. 192.168.1.50)."
         }
       },
       "user_reuse": {
@@ -1519,26 +1945,133 @@
           "host": "Lokální IP adresa vašeho spotřebiče Samsung (např. 192.168.1.50)."
         }
       },
+      "credential": {
+        "title": "Certifikát odmítnut",
+        "description": "{host} odmítl automatický certifikát. Některé spotřebiče místo certifikátu používají předsdílený klíč (PSK). LocalThings tento klíč nedokáže získat sám, proto importujte klíč, který už máte. Nabízí se i certifikát CA AC14K_M, ale zatím nebyl nahlášen žádný spotřebič, který by odmítl automatický certifikát a tento přijal.\n\nSpotřebiče s předsdíleným klíčem se teprve snažíme pochopit a pravděpodobně s nimi narazíte na problémy. Náš plán, dosavadní zjištění a místo pro zpětnou vazbu najdete v [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Importovat předsdílený klíč vlastníka",
+          "psk_peer": "Importovat předsdílený klíč peeru",
+          "fallback_ca": "Zkusit certifikát CA AC14K_M"
+        }
+      },
+      "credential_psk": {
+        "title": "Tento spotřebič pravděpodobně používá předsdílený klíč",
+        "description": "{host} odmítl automatický certifikát a jeho nešifrovaná bezpečnostní metadata uvádějí, že se místo toho ověřuje předsdíleným klíčem (PSK). LocalThings tento klíč nedokáže získat sám, proto importujte klíč, který už máte. Nabízí se i certifikát CA AC14K_M, ale zatím nebyl nahlášen žádný spotřebič, který by odmítl automatický certifikát a tento přijal.\n\nSpotřebiče s předsdíleným klíčem se teprve snažíme pochopit a pravděpodobně s nimi narazíte na problémy. Náš plán, dosavadní zjištění a místo pro zpětnou vazbu najdete v [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Importovat předsdílený klíč vlastníka",
+          "psk_peer": "Importovat předsdílený klíč peeru",
+          "fallback_ca": "Zkusit certifikát CA AC14K_M"
+        }
+      },
+      "ca_rejected": {
+        "title": "Certifikát stále odmítnut",
+        "description": "{host} odmítl i certifikát podepsaný touto CA. To odpovídá všem dosavadním hlášením: žádný spotřebič, který odmítl automatický certifikát, nepřijal CA AC14K_M. Možná používá předsdílený klíč. Přesný alert je v logu Home Assistant.\n\nSpotřebiče s předsdíleným klíčem se teprve snažíme pochopit a pravděpodobně s nimi narazíte na problémy. Náš plán, dosavadní zjištění a místo pro zpětnou vazbu najdete v [issue #435]({issue_url}).",
+        "menu_options": {
+          "psk_owner": "Importovat předsdílený klíč vlastníka",
+          "psk_peer": "Importovat předsdílený klíč peeru",
+          "fallback_ca": "Zadat CA znovu"
+        }
+      },
+      "fallback_ca": {
+        "title": "Certifikát CA AC14K_M",
+        "description": "Vložte certifikát CA AC14K_M a soukromý klíč. LocalThings jimi podepíše certifikát zařízení pro {host}.",
+        "data": {
+          "ca_cert_pem": "Certifikát CA (PEM)",
+          "ca_key_pem": "Privátní klíč CA (PEM)"
+        },
+        "data_description": {
+          "ca_cert_pem": "Certifikát CA AC14K_M ve formátu PEM. Vložte celý obsah řetězce fullchain PEM včetně všech bloků BEGIN/END CERTIFICATE.",
+          "ca_key_pem": "Privátní klíč AC14K_M ve formátu PEM. Vložte celý obsah včetně hlavičky a patičky BEGIN/END PRIVATE KEY."
+        }
+      },
+      "psk_owner": {
+        "title": "Předsdílený klíč vlastníka",
+        "description": "Zadejte předsdílený klíč vlastníka pro {host}. Identita je UUID vlastníka OCF, předvyplněné, pokud ho spotřebič hlásí. Před přidáním LocalThings ověří klíč na spotřebiči a zaznamená, který spotřebič odpověděl.\n\nSpotřebiče s předsdíleným klíčem se teprve snažíme pochopit a pravděpodobně s nimi narazíte na problémy. Náš plán, dosavadní zjištění a místo pro zpětnou vazbu najdete v [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identita (UUID vlastníka)",
+          "psk_key": "Klíč"
+        },
+        "data_description": {
+          "psk_key": "32 nebo 64 šestnáctkových znaků."
+        }
+      },
+      "psk_peer": {
+        "title": "Předsdílený klíč peeru",
+        "description": "Zadejte párové pověření peeru nainstalované na {host} vedle vlastnictví Samsungu přesně tak, jak ho vypsal nástroj, který ho nainstaloval. Identitu ani klíč nelze ze spotřebiče přečíst. Před přidáním LocalThings ověří klíč na spotřebiči a zaznamená, který spotřebič odpověděl.\n\nSpotřebiče s předsdíleným klíčem se teprve snažíme pochopit a pravděpodobně s nimi narazíte na problémy. Náš plán, dosavadní zjištění a místo pro zpětnou vazbu najdete v [issue #435]({issue_url}).",
+        "data": {
+          "psk_identity": "Identita (UUID peeru)",
+          "psk_key": "Klíč"
+        },
+        "data_description": {
+          "psk_key": "32 nebo 64 šestnáctkových znaků."
+        }
+      },
+      "reconfigure": {
+        "title": "Změnit adresu spotřebiče",
+        "description": "Zadejte aktuální IP adresu spotřebiče. Vše ostatní u tohoto zařízení zůstane beze změny — jeho entity, historie i automatizace budou zachovány.",
+        "data": {
+          "host": "IP adresa"
+        },
+        "data_description": {
+          "host": "Lokální IP adresa vašeho spotřebiče Samsung (např. 192.168.1.50)."
+        }
+      },
       "confirm_unknown_type": {
         "title": "Typ spotřebiče nebyl rozpoznán",
         "description": "Tento spotřebič hlásí model „{model}“, což je typ, který LocalThings zatím nerozpoznává. Přesto bude přidán, ale pouze se společnými funkcemi (napájení, alarmy atd., pokud jsou k dispozici), nikoli s plnou sadou funkcí pro danou rodinu spotřebičů. Podporu můžete později pomoci rozšířit stažením diagnostiky pro toto zařízení (Nastavení > Zařízení a služby > toto zařízení > nabídka > Stáhnout diagnostiku) a jejím vložením do nového issue. Odesláním zařízení přidáte i tak."
+      },
+      "legacy_token": {
+        "title": "Token zařízení",
+        "description": "Tento spotřebič ({host}) používá starší lokální API Samsungu, které kromě certifikátu potřebuje i token zařízení.\n\nNechte pole prázdné a odešlete formulář, aby token vydal sám spotřebič: bude o něj požádán a pošle jej zpět do Home Assistant na port 8889. Nejprve na spotřebiči zapněte dálkové ovládání (Smart Control) se zavřenými dvířky, jinak se během několika minut odpojí od Wi-Fi a neodpoví. Může to trvat až minutu a půl.\n\nPokud spotřebič na port 8889 do Home Assistant nedosáhne, získejte token jinak a vložte jej sem.",
+        "data": {
+          "device_token": "Token zařízení (prázdné = vyžádat si jej)"
+        }
+      },
+      "reauth_confirm": {
+        "title": "Token zařízení odmítnut",
+        "description": "{host} už nepřijímá svůj token zařízení. Nechte pole prázdné a odešlete, aby spotřebič vydal nový (dálkové ovládání zapnuté, dvířka zavřená a port 8889 na Home Assistant dosažitelný), nebo vložte token získaný jinak.",
+        "data": {
+          "device_token": "Token zařízení (nechte prázdné a vyžádá se nový)"
+        }
       }
     },
     "error": {
       "no_response": "Z této IP adresy nepřišla žádná odpověď — na žádném portu v rozsahu lokálního API spotřebiče (UDP 49152-49160) se nic neozvalo. Zkontrolujte, že je IP adresa správná, že je spotřebič zapnutý a ve stejné síti jako Home Assistant a že firewall neblokuje UDP provoz k němu.",
-      "ports_closed": "Tato IP adresa je dostupná, ale aktivně odmítla všechny porty v rozsahu lokálního API (UDP 49152-49160). Buď nejde o spotřebič Samsung, nebo má starší firmware, který komunikuje pouze s cloudem Samsung přes TCP 8888, což tato integrace neumí použít.",
+      "ports_closed": "Tato IP adresa je dostupná, ale aktivně odmítla všechny porty v rozsahu lokálního API (UDP 49152-49160) a na discovery kanálu vůbec neodpověděla. Nejspíš nejde o spotřebič Samsung, nebo jde o spotřebič bez zapnutého lokálního API.",
       "no_dtls_server": "Porty v rozsahu lokálního API jsou na této adrese dostupné, ale nic na nich neodpovědělo na DTLS handshake. Ověřte, že IP adresa patří spotřebiči, a ne jinému zařízení ve vaší síti.",
-      "handshake_timeout": "Spotřebič odpověděl na portu lokálního API, ale nedokončil DTLS handshake. Obvykle stále drží relaci z předchozího pokusu — počkejte přibližně minutu a zkuste to znovu.",
+      "appliance_no_dtls": "Na této adrese je spotřebič Samsung — přes nešifrovaný discovery kanál se představil jako {model} a jako svůj zabezpečený port uvedl {port} — ale handshake DTLS na něm nikdy nedokončil. Adresa tedy není problém. Zkontrolujte, zda spotřebič nemá na panelu vypnuté dálkové ovládání nebo podobné nastavení, a přesný důvod selhání najdete v logu Home Assistanta.",
+      "non_appliance_stack": "Na této IP adrese něco odpovědělo, ale ohlásilo se jako služba OCF, která není spotřebičem. Některé spotřebiče Samsung ji provozují vedle své vlastní a LocalThings najde spotřebič za ní jen tehdy, když je Home Assistant ve stejném segmentu sítě. Umístěte Home Assistant a spotřebič do stejné podsítě a VLAN a zkuste to znovu.",
+      "multiple_appliances": "Na této IP adrese odpovídá více než jeden spotřebič Samsung a LocalThings mezi nimi zatím neumí vybrat. Nahlaste to prosím v systému hlášení chyb LocalThings a přiložte log Home Assistantu.",
+      "handshake_timeout": "Spotřebič odpověděl na portu lokálního API, ale nedokončil DTLS handshake ani po opakovaném pokusu. Zkuste to znovu. Pokud to stále selhává, restart spotřebiče uvolní připojení, která stále drží; přesnou chybu najdete v logu Home Assistantu.",
       "cert_rejected": "Spotřebič odmítl certifikát. Certifikát CA a klíč pravděpodobně nepatří CA AC14K_M, které spotřebič důvěřuje, nebo k sobě nepasují. Přesný alert, který spotřebič odeslal, najdete v logu Home Assistanta.",
+      "psk_rejected": "Spotřebič odmítl předsdílený klíč. Identita nebo klíč jsou chybné, nebo patří jinému spotřebiči či vlastníkovi, který se mezitím změnil. Přesný alert je v logu Home Assistant.",
+      "identity_unproven": "Klíč fungoval, ale spotřebič přes šifrované spojení nenahlásil své ID zařízení OCF, takže LocalThings nemůže potvrdit, který spotřebič klíč drží, a nepřidá ho. Zkuste to znovu, když je spotřebič probuzený. Pokud se to opakuje, dejte nám vědět v [issue #435]({issue_url}) a přiložte log Home Assistant.",
+      "invalid_psk_identity": "Zadejte identitu jako UUID, například 12345678-1234-1234-1234-123456789abc.",
+      "psk_identity_zero_byte": "Toto UUID obsahuje nulový bajt, který nainstalovaný transport nedokáže odeslat. Obnovenou identitu ponechte beze změny.",
+      "invalid_psk_key": "Zadejte klíč jako 32 nebo 64 šestnáctkových znaků.",
       "handshake_failed": "Spotřebič odmítl DTLS handshake z důvodu, který nesouvisí s certifikátem — nejspíše kvůli neshodě protokolu nebo šifry. Přesný alert najdete v logu Home Assistanta.",
       "cloud_unreachable": "Nepodařilo se spojit s cloudovou bránou Samsung a získat UUID potřebné k vystavení certifikátu tohoto zařízení. Zkontrolujte přístup Home Assistanta k internetu a zkuste to znovu.",
       "unexpected_response": "Připojení k zařízení proběhlo úspěšně, ale nevrátilo použitelný popis zařízení. Nemusí jít o spotřebič, který tato integrace podporuje. Co zařízení odeslalo, najdete v logu Home Assistanta.",
-      "cannot_connect": "Nelze se připojit k zařízení. Ověřte, že je IP adresa dostupná a že jsou přihlašovací údaje CA správné.",
+      "cannot_connect": "K zařízení se nelze připojit. Zkontrolujte, zda je IP adresa správná a zda je spotřebič zapnutý a připojený k vaší síti.",
       "invalid_ca": "Certifikát CA nebo privátní klíč se nepodařilo načíst. Ověřte, že obsah PEM je správný a že klíč odpovídá certifikátu.",
-      "unknown": "Neočekávaná chyba. Podrobnosti najdete v protokolech Home Assistant."
+      "unknown": "Neočekávaná chyba. Podrobnosti najdete v protokolech Home Assistant.",
+      "wrong_device": "Na této adrese odpověděl spotřebič Samsung, ale není to tento — ohlásil jinou identitu. Zkontrolujte, že adresa patří tomuto spotřebiči. Chcete-li přidat ten druhý, použijte možnost Přidat zařízení.",
+      "token_not_received": "Nedorazil žádný token zařízení. Zkontrolujte, že je na spotřebiči zapnuté dálkové ovládání se zavřenými dvířky a že dosáhne na Home Assistant na port 8889 – nebo vložte token získaný jinak.",
+      "invalid_token": "Spotřebič tento token zařízení odmítl. Nechte pole prázdné a vyžádejte si nový.",
+      "callback_port_in_use": "Port 8889 je v Home Assistant už obsazený, obvykle ještě čekající žádostí o token. Zkuste to znovu za minutu a půl.",
+      "callback_cert_rejected": "Spotřebič se ozval zpět na portu 8889, ale odmítl certifikát Home Assistant podepsaný sám sebou. Vložte certifikát a klíč CA AC14K_M, aby LocalThings podepsal certifikát, který přijme; žádost o token se pak spustí znovu.",
+      "callback_ca_rejected": "Spotřebič se ozval zpět na portu 8889, ale odmítl i certifikát podepsaný AC14K_M. Vložte token získaný jiným způsobem; chybu handshaku najdete v protokolu Home Assistant."
     },
     "abort": {
-      "already_configured": "Zařízení je již nakonfigurováno"
+      "already_configured": "Zařízení je již nakonfigurováno",
+      "already_in_progress": "Konfigurace již probíhá",
+      "reconfigure_successful": "Adresa byla aktualizována",
+      "no_entry_for_mac": "Žádný nakonfigurovaný spotřebič neuchovává tuto MAC adresu",
+      "reauth_successful": "Nový token zařízení funguje; spotřebič se znovu připojuje.",
+      "reauth_unsupported": "Tento spotřebič tu nemá žádné přihlašovací údaje k obnovení. Pokud přestal odpovídat, odeberte ho a přidejte znovu."
+    },
+    "progress": {
+      "legacy_token": "Čeká se, až {host} pošle token zařízení do Home Assistant na port 8889. Trvá to až minutu a půl."
     }
   },
   "options": {
@@ -1650,8 +2183,17 @@
     "remote_control_disabled": {
       "message": "Dálkové ovládání je na tomto zařízení vypnuté. V návodu ke spotřebiči zjistěte, jak zapnout dálkové ovládání, než jej bude moci Home Assistant ovládat."
     },
+    "oven_mode_idle_not_selectable": {
+      "message": "NoOperation je stav, který trouba hlásí v nečinnosti. Nelze jej zvolit jako režim; zrušte pečení na ovládacím panelu trouby."
+    },
     "debug_payload_empty": {
       "message": "Obsah ladicího zápisu musí být neprázdný objekt."
+    },
+    "debug_batch_too_many_elements": {
+      "message": "Dávkový payload musí mít 1 až {max} prvků."
+    },
+    "debug_batch_element_invalid": {
+      "message": "Každý prvek dávky musí být objekt s href a s rep jako objektem, pokud je uveden."
     },
     "resource_href_required": {
       "message": "Je vyžadován href prostředku."
@@ -1668,8 +2210,29 @@
     "command_failed": {
       "message": "Příkaz pro {href} selhal i po opětovném připojení: {error}"
     },
+    "command_refused": {
+      "message": "Spotřebič odmítl příkaz pro {href}: {error}"
+    },
+    "command_not_confirmed": {
+      "message": "Příkaz pro {href} byl odeslán s vypnutým dálkovým ovládáním, ale spotřebič ho zatím nezobrazuje. Pokud nezareaguje, zapněte na spotřebiči dálkové ovládání."
+    },
     "debug_read_failed": {
       "message": "Čtení z {href} selhalo: {error}"
+    },
+    "observe_duration_out_of_range": {
+      "message": "Doba musí být větší než 0 a nejvýše {max} sekund."
+    },
+    "observe_not_supported": {
+      "message": "Rozhraní tohoto spotřebiče nepodporuje sledování prostředků."
+    },
+    "observe_query_while_observed": {
+      "message": "{href} už tato integrace sleduje, proto ho nelze sledovat znovu s dotazem."
+    },
+    "observe_in_progress": {
+      "message": "{href} už sleduje jiné volání. Počkejte, až skončí."
+    },
+    "debug_observe_failed": {
+      "message": "Sledování {href} selhalo: {error}"
     },
     "debug_too_many_writes": {
       "message": "Zadejte 1 až 10 zápisů."
@@ -1688,6 +2251,69 @@
     },
     "service_device_not_loaded": {
       "message": "Toto zařízení ještě není připojeno. Zkuste to znovu, až se načte."
+    },
+    "cook_start_not_supported": {
+      "message": "Tento spotřebič nehlásí žádný režim, který lze spustit na dálku, takže ho Home Assistant nemůže spustit."
+    },
+    "cook_start_not_idle": {
+      "message": "Spotřebič už vaří. Nejprve ho zastavte, nebo změňte teplotu a dobu přípravy za chodu."
+    },
+    "cook_mode_required": {
+      "message": "Nejprve zvolte režim. Tento spotřebič lze spustit v režimech: {startable}."
+    },
+    "cook_mode_not_startable": {
+      "message": "Režim {mode} nelze na tomto spotřebiči spustit na dálku. Lze spustit: {startable}."
+    },
+    "cook_mode_unavailable": {
+      "message": "Režim {mode} teď v tomto prostoru trouby není k dispozici. Lze spustit: {startable}."
+    },
+    "cook_temperature_not_supported": {
+      "message": "Režim {mode} nemá nastavení teploty."
+    },
+    "cook_temperature_required": {
+      "message": "Režim {mode} vyžaduje teplotu."
+    },
+    "cook_temperature_not_a_choice": {
+      "message": "Režim {mode} přijímá jen {choices}."
+    },
+    "cook_temperature_out_of_range": {
+      "message": "Režim {mode} přijímá teplotu od {min} do {max}."
+    },
+    "cook_duration_not_supported": {
+      "message": "Režim {mode} nemá dobu přípravy."
+    },
+    "cook_duration_required": {
+      "message": "Režim {mode} vyžaduje dobu přípravy."
+    },
+    "cook_duration_out_of_range": {
+      "message": "Režim {mode} přijímá dobu přípravy od {min} do {max}."
+    },
+    "extra_rinse_unavailable_for_cycle": {
+      "message": "Extra máchání není u vybraného cyklu k dispozici."
+    }
+  },
+  "selector": {
+    "instance_name": {
+      "options": {
+        "freezer": "Mrazák",
+        "cooler": "Chladnička",
+        "top": "Horní oddíl",
+        "middle": "Střední oddíl",
+        "bottom": "Dolní oddíl",
+        "onedoor": "Oddíl na kimči",
+        "winecellar_top": "Horní vinná zóna",
+        "winecellar_bottom": "Dolní vinná zóna",
+        "door_freezer": "Dvířka mrazáku",
+        "door_cooler": "Dvířka chladničky",
+        "door_cvroom": "Dvířka flexibilní zóny",
+        "door_winecellar": "Dvířka vinotéky",
+        "door_onedoorfreezer": "Hlavní dvířka",
+        "door_onedoorkimchi": "Hlavní dvířka",
+        "ice_maker": "Výrobník ledu",
+        "cubed_ice": "Kostky ledu",
+        "ice_bites": "Ice Bites",
+        "whiskey_ice_ball": "Ledové koule"
+      }
     }
   }
 }

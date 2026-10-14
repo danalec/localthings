@@ -15,16 +15,29 @@ range_hood.py rather than duplicated. Unlike a standalone hood, this dump
 has no sibling `/power/0` or `/power/vs/0` resource; fan.py's
 LocalThingsRangeHoodFan falls back to treating fan speed 0 as off in that
 case (see its `_speed_zero_is_off` check).
+
+A DAWIT 3.0 generation board (issue #433) answers none of the hrefs above
+at all -- it carries its own `/oven/status/vs/0`/`/oven/spec/vs/0`/
+`/oven/settings/status/vs/0` cavity resources (microwave.MICROWAVE_STATUS/
+MICROWAVE_SPEC/MICROWAVE_SETTINGS) and its own `/hood/status/vs/0`/
+`/hood/spec/vs/0` vent resources (range_hood.HOOD_STATUS/HOOD_SPEC), added
+alongside the older hrefs above rather than replacing them -- discovery
+binds whichever generation's hrefs a given device actually reports.
+
+`/configuration/vs/0` gets the range's clock-sync button (issue #496,
+NQ7000B): the write contract is the one verified on a TP1X_DA-KS range
+(issue #404), not yet confirmed on a microwave-class board.
 """
 
-from ..capabilities import common, ignored, microwave, oven, range_hood
+from ..capabilities import common, dishwasher, ignored, microwave, oven, range_hood
+from ..capabilities import range as range_caps
 from ._base import DeviceRegistry, _build
 
 REGISTRY = DeviceRegistry(
     name="microwave",
     capabilities=_build(
         [
-            *ignored.IGNORED,
+            *ignored.without("/configuration/vs/0"),
             *common.UNIVERSAL,
             *common.POWER,
             microwave.MICROWAVE_CAVITY,
@@ -35,6 +48,15 @@ REGISTRY = DeviceRegistry(
             oven.OVEN_CONNECTED,
             oven.OVEN_RECIPE_COOK,
             range_hood.HOOD_FAN,
+            microwave.MICROWAVE_STATUS,
+            microwave.MICROWAVE_SPEC,
+            microwave.MICROWAVE_SETTINGS,
+            range_hood.HOOD_STATUS,
+            range_hood.HOOD_SPEC,
+            range_caps.RANGE_CLOCK_SYNC,
+            # The same diagnosisStart shape the oven registry binds (#300),
+            # reported by the NW9300MD wall combo's microwave cavity (#525).
+            dishwasher.DIAGNOSIS,
         ]
     ),
 )

@@ -4,8 +4,6 @@ from __future__ import annotations
 
 from dataclasses import dataclass, field
 
-import cbor2
-
 
 @dataclass(frozen=True)
 class DeviceIdentity:
@@ -99,6 +97,24 @@ def ocf_device_key(identity: DeviceIdentity | None) -> str | None:
     return None
 
 
+def proven_ocf_device_id(identity: DeviceIdentity | None) -> str | None:
+    """/oic/d's `di` alone, when the device reported a usable one.
+
+    Deliberately not `ocf_device_key`'s chain: that falls back to /oic/p's
+    `pi`, which is platform-scoped and shared by every logical device on one
+    board, and then to the serial and the host. Those are fine for minting a
+    stable registry key but none of them is the OCF device identity, so
+    anything checking *which device answered* needs this narrower answer.
+    Normalized the same way, so the two are comparable when they do agree.
+    """
+    if identity is None:
+        return None
+    device_id = identity.device_id
+    if device_id is None or not is_usable_device_id(device_id):
+        return None
+    return device_id.strip().lower()
+
+
 def resolve_device_key(identity: DeviceIdentity | None, raw_serial: str | None, host: str) -> str:
     """The identity to mint this device's permanent registry keys from.
 
@@ -145,32 +161,30 @@ def device_display_name(device_type_name: str | None, model: str) -> str:
     return f"Samsung {device_type} ({model})" if model else f"Samsung {device_type}"
 
 
-def _get(sess, path) -> dict:
+def _get(transport, path) -> dict:
     try:
-        code, pl = sess.get(path, timeout=10.0)
-        if code == 0x45 and pl:
-            body = cbor2.loads(pl)
+        code, body = transport.read(path, timeout=10.0)
+        if code == 0x45:
             return body if isinstance(body, dict) else {}
     except Exception:
         pass
     return {}
 
 
-def _get_links(sess, path) -> list:
+def _get_links(transport, path) -> list:
     """Like _get, but for /oic/res: a baseline-Interface RETRIEVE on it
-    returns a CBOR array of Link objects (href/rt/if/di/...), not a single
+    returns an array of Link objects (href/rt/if/di/...), not a single
     Property map."""
     try:
-        code, pl = sess.get(path, timeout=10.0)
-        if code == 0x45 and pl:
-            body = cbor2.loads(pl)
+        code, body = transport.read(path, timeout=10.0)
+        if code == 0x45:
             return body if isinstance(body, list) else []
     except Exception:
         pass
     return []
 
 
-def _device_types(d: dict) -> tuple[str, ...]:
+def device_types_of(d: dict) -> tuple[str, ...]:
     """/oic/d's `rt` -- the device's own OCF device-type declaration.
 
     The one standardized "what am I" field in OCF: alongside the generic
@@ -189,9 +203,9 @@ def _device_types(d: dict) -> tuple[str, ...]:
     return tuple(t for t in rt if isinstance(t, str))
 
 
-def read_identity(sess, serial: str | None) -> DeviceIdentity:
-    p = _get(sess, ["oic", "p"])
-    d = _get(sess, ["oic", "d"])
+def read_identity(transport, serial: str | None) -> DeviceIdentity:
+    p = _get(transport, ["oic", "p"])
+    d = _get(transport, ["oic", "d"])
     # /oic/res is OCF's baseline resource-discovery endpoint: a unicast
     # RETRIEVE returns every Resource/Collection href this endpoint hosts,
     # not just /device/0. Relevant for the "Composite Device" model (issue
@@ -200,7 +214,7 @@ def read_identity(sess, serial: str | None) -> DeviceIdentity:
     # reads this to find a board's `/device/<n>` siblings -- that probing
     # used to run right here on every _connect_session/reconnect and moved
     # to that module so it only runs once, at first discovery.
-    res = _get_links(sess, ["oic", "res"])
+    res = _get_links(transport, ["oic", "res"])
     return DeviceIdentity(
         manufacturer=p.get("mnmn") or "Samsung",
         model=p.get("mnmo") or "",
@@ -208,9 +222,38 @@ def read_identity(sess, serial: str | None) -> DeviceIdentity:
         serial=serial,
         device_id=d.get("di") if isinstance(d.get("di"), str) else None,
         platform_id=p.get("pi") if isinstance(p.get("pi"), str) else None,
-        device_types=_device_types(d),
+        device_types=device_types_of(d),
         # Kept whole rather than field-by-field: outside the /device/0 dump
         # diagnostics already captures, and we don't yet know which fields
         # will turn out to identify a device type.
         raw={"/oic/p": p, "/oic/d": d, "/oic/res": res},
     )
+
+
+WIRELESS_INFO_HREF = "/wirelessinfo/vs/0"
+
+
+def resolve_mac(resources: dict[str, dict]) -> str | None:
+    """The appliance's own WiFi MAC, in Home Assistant's connection form.
+
+    /wirelessinfo/vs/0 is otherwise ignored as an entity source
+    (registry/capabilities/ignored.py), but its macaddressWiFi is the only
+    field of an appliance's own state that a DHCP sighting can be matched
+    against: Home Assistant hands discovery an (ip, hostname, mac) triple,
+    and neither of the other two identifies a unit -- three of issue #469's
+    air conditioners share one hostname.
+
+    Roughly half the dumps in tests/fixtures carry the resource at all, so
+    None is an ordinary answer here, not a fault.
+    """
+    raw = (resources.get(WIRELESS_INFO_HREF) or {}).get("macaddressWiFi")
+    if not isinstance(raw, str):
+        return None
+    digits = raw.strip().lower().replace(":", "").replace("-", "").replace(".", "")
+    if len(digits) != 12 or set(digits) - set("0123456789abcdef"):
+        return None
+    # An unflashed radio reports all zeros; every unit of such a family would
+    # otherwise bind to one another's address -- the #189 failure mode again.
+    if set(digits) == {"0"}:
+        return None
+    return ":".join(digits[i : i + 2] for i in range(0, 12, 2))
